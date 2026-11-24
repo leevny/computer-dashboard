@@ -5,10 +5,87 @@ mod gpu;
 use eframe::egui;
 use std::time::{Duration, Instant};
 use sysinfo::System;
+use windows::Win32::Globalization::GetUserDefaultUILanguage;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
 const TRAY_RGBA: &[u8] = include_bytes!("../assets/tray.rgba");
+
+// ---- i18n：系统 UI 语言检测（zh 系→中文，其余→英文），简单字符串表，无框架 ----
+#[derive(Clone, Copy, PartialEq)]
+enum Lang {
+    Zh,
+    En,
+}
+
+impl Lang {
+    fn detect() -> Self {
+        unsafe {
+            if GetUserDefaultUILanguage() & 0x3FF == 0x04 {
+                Lang::Zh
+            } else {
+                Lang::En
+            }
+        }
+    }
+    fn strings(self) -> &'static Strings {
+        match self {
+            Lang::Zh => &ZH,
+            Lang::En => &EN,
+        }
+    }
+}
+
+struct Strings {
+    mem: &'static str,
+    vram: &'static str,
+    glass_sub: &'static str,
+    theme_sub: &'static str,
+    style_liquid: &'static str,
+    style_hybrid: &'static str,
+    theme_dark: &'static str,
+    theme_light: &'static str,
+    topmost: &'static str,
+    quit: &'static str,
+    light_idle: &'static str,
+    light_exec: &'static str,
+    light_need: &'static str,
+    light_none: &'static str,
+}
+
+const ZH: Strings = Strings {
+    mem: "内存",
+    vram: "显存",
+    glass_sub: "玻璃风格",
+    theme_sub: "主题",
+    style_liquid: "液态玻璃",
+    style_hybrid: "混合玻璃",
+    theme_dark: "深色主题",
+    theme_light: "浅色主题",
+    topmost: "窗口置顶",
+    quit: "退出",
+    light_idle: "空闲",
+    light_exec: "执行中",
+    light_need: "需要接入",
+    light_none: "Claude：无活跃会话",
+};
+
+const EN: Strings = Strings {
+    mem: "Memory",
+    vram: "VRAM",
+    glass_sub: "Glass style",
+    theme_sub: "Theme",
+    style_liquid: "Liquid glass",
+    style_hybrid: "Hybrid glass",
+    theme_dark: "Dark theme",
+    theme_light: "Light theme",
+    topmost: "Always on top",
+    quit: "Quit",
+    light_idle: "Idle",
+    light_exec: "Executing",
+    light_need: "Needs you",
+    light_none: "Claude: no active session",
+};
 
 const A0: f32 = -120.0; // 表盘起始角：0° 朝上，顺时针为正
 const SWEEP: f32 = 240.0;
@@ -74,10 +151,12 @@ enum Theme {
 }
 
 impl Theme {
-    fn name(self) -> &'static str {
-        match self {
-            Theme::Dark => "深色主题",
-            Theme::Light => "浅色主题",
+    fn name(self, lang: Lang) -> &'static str {
+        match (self, lang) {
+            (Theme::Dark, Lang::Zh) => "深色主题",
+            (Theme::Dark, Lang::En) => "Dark theme",
+            (Theme::Light, Lang::Zh) => "浅色主题",
+            (Theme::Light, Lang::En) => "Light theme",
         }
     }
     fn next(self) -> Self {
@@ -109,10 +188,12 @@ enum GlassStyle {
 impl GlassStyle {
     const ALL: [GlassStyle; 2] = [GlassStyle::Liquid, GlassStyle::Hybrid];
 
-    fn name(self) -> &'static str {
-        match self {
-            GlassStyle::Liquid => "液态玻璃",
-            GlassStyle::Hybrid => "混合玻璃",
+    fn name(self, lang: Lang) -> &'static str {
+        match (self, lang) {
+            (GlassStyle::Liquid, Lang::Zh) => "液态玻璃",
+            (GlassStyle::Liquid, Lang::En) => "Liquid glass",
+            (GlassStyle::Hybrid, Lang::Zh) => "混合玻璃",
+            (GlassStyle::Hybrid, Lang::En) => "Hybrid glass",
         }
     }
     fn ordinal(self) -> usize {
@@ -145,7 +226,8 @@ fn main() -> eframe::Result<()> {
         options,
         Box::new(move |cc| {
             load_cjk(&cc.egui_ctx);
-            let tray = TrayUi::new(&cc.egui_ctx).ok(); // ponytail: 托盘失败仅失去快捷入口，主窗口不受影响
+            let lang = Lang::detect();
+            let tray = TrayUi::new(&cc.egui_ctx, lang).ok(); // ponytail: 托盘失败仅失去快捷入口，主窗口不受影响
             if let Some(gl) = cc.gl.clone() {
                 egui_bg_layer::install_glow(&cc.egui_ctx, &gl).ok();
             }
@@ -159,6 +241,7 @@ fn main() -> eframe::Result<()> {
                 topmost: true,
                 style: GlassStyle::Hybrid,
                 theme: Theme::Light,
+                lang,
                 tray,
             }))
         }),
@@ -193,20 +276,21 @@ struct TrayUi {
 }
 
 impl TrayUi {
-    fn new(ctx: &egui::Context) -> Result<Self, String> {
+    fn new(ctx: &egui::Context, lang: Lang) -> Result<Self, String> {
+        let s = lang.strings();
         let style_items: Vec<CheckMenuItem> = GlassStyle::ALL
             .iter()
-            .map(|s| CheckMenuItem::new(s.name(), true, *s == GlassStyle::Hybrid, None))
+            .map(|st| CheckMenuItem::new(st.name(lang), true, *st == GlassStyle::Liquid, None))
             .collect();
         let theme_items: Vec<CheckMenuItem> = [Theme::Dark, Theme::Light]
             .iter()
-            .map(|t| CheckMenuItem::new(t.name(), true, *t == Theme::Dark, None))
+            .map(|t| CheckMenuItem::new(t.name(lang), true, *t == Theme::Dark, None))
             .collect();
-        let status_item = MenuItem::new("Claude：状态过期", false, None);
-        let check_top = CheckMenuItem::new("窗口置顶", true, true, None);
-        let quit = MenuItem::new("退出", true, None);
-        let style_sub = Submenu::new("玻璃风格", true);
-        let theme_sub = Submenu::new("主题", true);
+        let status_item = MenuItem::new(s.light_none, false, None);
+        let check_top = CheckMenuItem::new(s.topmost, true, true, None);
+        let quit = MenuItem::new(s.quit, true, None);
+        let style_sub = Submenu::new(s.glass_sub, true);
+        let theme_sub = Submenu::new(s.theme_sub, true);
         for it in &style_items {
             style_sub.append(it).map_err(|e| e.to_string())?;
         }
@@ -271,6 +355,7 @@ struct App {
     topmost: bool,
     style: GlassStyle,
     theme: Theme,
+    lang: Lang,
     tray: Option<TrayUi>,
 }
 
@@ -282,11 +367,14 @@ enum Light {
 }
 
 impl Light {
-    fn text(self) -> &'static str {
-        match self {
-            Light::Green => "空闲",
-            Light::Yellow => "执行中",
-            Light::Red => "需要接入",
+    fn text(self, lang: Lang) -> &'static str {
+        match (self, lang) {
+            (Light::Green, Lang::Zh) => "空闲",
+            (Light::Green, Lang::En) => "Idle",
+            (Light::Yellow, Lang::Zh) => "执行中",
+            (Light::Yellow, Lang::En) => "Executing",
+            (Light::Red, Lang::Zh) => "需要接入",
+            (Light::Red, Lang::En) => "Needs you",
         }
     }
     /// 状态灯颜色（状态语义色，非指标色）
@@ -355,6 +443,7 @@ impl eframe::App for App {
         ui.ctx().request_repaint_after(wait.max(Duration::from_millis(33)));
 
         let pal = self.theme.palette();
+        let s = self.lang.strings();
         let (glow_a, blur_r, sat, overlay_a) = self.style.params();
 
         egui::Frame::NONE.fill(pal.scrim).show(ui, |ui| {
@@ -433,7 +522,7 @@ impl eframe::App for App {
                 let (r2, _) = ui.allocate_exact_size(egui::vec2(w, 106.0), egui::Sense::hover());
                 let c2 = r2.center() + egui::vec2(0.0, 4.0);
                 draw_gauge(p, c2, disp[2], pal.mem, disp[3], pal.vram, pal);
-                readout(p, c2, ("内存", disp[2], pal.mem), ("显存", disp[3], pal.vram));
+                readout(p, c2, (s.mem, disp[2], pal.mem), (s.vram, disp[3], pal.vram));
             });
         });
     }
@@ -527,14 +616,15 @@ impl App {
                 Light::Green => g += 1,
             }
         }
+        let s = self.lang.strings();
         let text = if self.sessions.is_empty() {
-            "Claude：无活跃会话".to_string()
+            s.light_none.to_string()
         } else {
             let mut parts = Vec::new();
-            if r > 0 { parts.push(format!("需要接入×{r}")); }
-            if y > 0 { parts.push(format!("执行中×{y}")); }
-            if g > 0 { parts.push(format!("空闲×{g}")); }
-            format!("Claude：{}", parts.join(" · "))
+            if r > 0 { parts.push(format!("{}×{r}", s.light_need)); }
+            if y > 0 { parts.push(format!("{}×{y}", s.light_exec)); }
+            if g > 0 { parts.push(format!("{}×{g}", s.light_idle)); }
+            format!("{} {}", if self.lang == Lang::Zh { "Claude：" } else { "Claude: " }, parts.join(" · "))
         };
         if let Some(tray) = &self.tray {
             tray.status_item.set_text(text);

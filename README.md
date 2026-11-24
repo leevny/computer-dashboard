@@ -1,45 +1,51 @@
+<div align="right">
+
+[English](README.md) | [中文](README.zh-CN.md)
+
+</div>
+
 # sys-gauge
 
-224×112 的 Windows 桌面常驻仪表盘：Rust + egui 实现，双针双盘（汽车转速表风格）实时显示 CPU / 内存 / GPU / 显存占用，低内存低 CPU 占用，默认置顶。
+A 224×112 always-on-top Windows desktop dashboard: twin-needle tachometer gauges showing CPU / Memory / GPU / VRAM in real time. Built with Rust + egui — low memory footprint, low CPU usage.
 
-## 功能特性
+## Features
 
-- **置顶无边框小窗**（224×112），整窗可拖动移动，托盘退出
-- **双针双盘**：外环 CPU / 内存，内环 GPU / 显存，85–100% 红区；1 秒采样，指针 1s 缓动
-- **液态玻璃视觉**：egui_bg_layer 光晕 + 指标色氛围，托盘切「液态玻璃 / 混合玻璃」，深色 / 浅色主题独立切换
-- **系统托盘**：Claude 状态行、玻璃风格与主题单选、窗口置顶、退出
-- **资源占用**：内存 ~110 MB、CPU <1% 单核（空闲时更低）；exe ~4.9 MB
-- **数据源**：sysinfo（CPU / 内存）+ Windows PDH（GPU 利用率与显存，全厂商通用，无需厂商 SDK）+ DXGI（显存总量）
+- **Always-on-top frameless mini window** (224×112), draggable, quit via tray
+- **Twin-needle twin gauges**: outer ring CPU / Memory, inner ring GPU / VRAM, 85–100% redline; 1 s sampling with 1 s eased needle
+- **Liquid-glass visuals**: egui_bg_layer glow + per-metric ambient light; tray switches between **Liquid glass / Hybrid glass** and **Dark / Light** themes independently
+- **System tray**: Claude status line, glass style & theme radio group, always-on-top toggle, quit
+- **Footprint**: ~110 MB RAM, <1% of one core when idle; binary ~4.9 MB
+- **Data sources**: sysinfo (CPU / memory) + Windows PDH (GPU utilization & VRAM, all vendors, no vendor SDK) + DXGI (total VRAM)
 
-## Claude Code 状态灯
+## Claude Code status lights
 
-面板中缝竖排多灯，**一灯一个 Claude Code 会话**，会话结束对应灯即时消失（另有 60s 无更新自动消失的兜底）：
+Vertical lights in the middle of the panel — **one light per Claude Code session**, each light disappears when its session ends (plus a 60 s staleness fallback):
 
-| 灯色 | 含义 |
+| Light | Meaning |
 |---|---|
-| 🟢 绿 | 空闲 / 等你输入 |
-| 🟡 黄 | 执行中（呼吸闪烁） |
-| 🔴 红 | 需要接入：权限请求、API 报错、5 小时限额 |
-| ⚪ 无灯 | 无活跃会话 |
+| 🟢 Green | Idle / waiting for your input |
+| 🟡 Yellow | Executing (breathing pulse) |
+| 🔴 Red | Needs you: permission request, API error, 5-hour usage limit |
+| ⚪ Off | No active session |
 
-安装 hooks（幂等，首次运行自动备份全局 `settings.json` 为 `.bak`）：
+Install the hooks (idempotent; backs up the global `settings.json` to `.bak` on first run):
 
 ```bash
 python tools/install-hooks.py
 ```
 
-- 写入全局 `~/.claude/settings.json`：SessionStart=绿、UserPromptSubmit / PostToolUse=黄、Stop=绿、Notification=红（按通知内容分级，权限请求红、空闲等输入绿）、SessionEnd=删灯
-- 数据目录 `~/.claude/light/`；hook 脚本失败静默退出，不影响 Claude Code 本身
+- Merges into the global `~/.claude/settings.json`: SessionStart=green, UserPromptSubmit / PostToolUse=yellow, Stop=green, Notification=red (graded by notification content), SessionEnd=remove light
+- Data directory `~/.claude/light/`; hook scripts fail silently and never affect Claude Code itself
 
-## 构建
+## Build
 
-Win11 + Rust stable toolchain：
+Windows 11 + Rust stable toolchain:
 
 ```bash
 cargo build --release
 ```
 
-产物 `target/release/sys-gauge.exe`，双击运行（GUI subsystem，无控制台窗口）。
+Binary: `target/release/sys-gauge.exe` — double-click to run (GUI subsystem, no console window).
 
 ## License
 
