@@ -499,6 +499,38 @@ struct Stats {
     vram_pct: f32,
 }
 
+/// 默认位置：主显示器工作区（排除任务栏）右下角。
+/// 全链路物理像素——SPI_GETWORKAREA / GetWindowRect / SetWindowPos 同一坐标系，
+/// 不经过 DIP 换算，任何缩放比例下贴角位置一致，不遮挡任务栏时钟/托盘区。
+/// 仅启动时设置一次；用户拖动后的位置自然保持。
+fn set_default_position(frame: &eframe::Frame) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowRect, SetWindowPos, SystemParametersInfoW, SPI_GETWORKAREA,
+        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SWP_NOZORDER, SWP_NOSIZE,
+    };
+    #[allow(deprecated)]
+    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+    let Ok(RawWindowHandle::Win32(w)) = HasRawWindowHandle::raw_window_handle(frame) else { return };
+    let hwnd = HWND(w.hwnd.get() as *mut core::ffi::c_void);
+    unsafe {
+        let mut wa = windows::Win32::Foundation::RECT::default();
+        SystemParametersInfoW(
+            SPI_GETWORKAREA,
+            0,
+            Some(&mut wa as *mut _ as *mut core::ffi::c_void),
+            SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+        );
+        let mut wr = windows::Win32::Foundation::RECT::default();
+        GetWindowRect(hwnd, &mut wr);
+        let win_w = wr.right - wr.left;
+        let win_h = wr.bottom - wr.top;
+        let x = wa.right - win_w;
+        let y = wa.bottom - win_h;
+        SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER);
+    }
+}
+
 /// 工具窗口样式：任务栏与 Alt+Tab 不出现（程序只以托盘小图标存在）。
 /// 点击/焦点/拖动不受影响。同时清除 winit 对 frameless 窗口默认设置的
 /// WS_EX_APPWINDOW（该位与 TOOLWINDOW 并存时任务栏仍显示）。
@@ -527,6 +559,9 @@ impl eframe::App for App {
         // 工具窗口样式（任务栏/Alt+Tab 隐藏）：每帧读回校验，不对即重写
         // （首帧过早设置或 winit 后续重写 EXSTYLE 两种情况都覆盖）
         ensure_toolwindow_style(frame);
+        // 默认位置（工作区右下角）：启动后设置一次，用户拖动后自然保持
+        static DEFAULT_POS_DONE: std::sync::OnceLock<()> = std::sync::OnceLock::new();
+        DEFAULT_POS_DONE.get_or_init(|| set_default_position(frame));
         let _ = frame;
         // 托盘菜单事件（控制入口全部在托盘）
         let events: Vec<MenuEvent> = self.tray.as_ref()
