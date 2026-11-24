@@ -499,8 +499,34 @@ struct Stats {
     vram_pct: f32,
 }
 
+/// 工具窗口样式：任务栏与 Alt+Tab 不出现（程序只以托盘小图标存在）。
+/// 点击/焦点/拖动不受影响。同时清除 winit 对 frameless 窗口默认设置的
+/// WS_EX_APPWINDOW（该位与 TOOLWINDOW 并存时任务栏仍显示）。
+fn ensure_toolwindow_style(frame: &eframe::Frame) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE,
+    };
+    const WS_EX_TOOLWINDOW: i32 = 0x0000_0080;
+    const WS_EX_APPWINDOW: i32 = 0x0004_0000;
+    #[allow(deprecated)]
+    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+    let Ok(RawWindowHandle::Win32(w)) = HasRawWindowHandle::raw_window_handle(frame) else { return };
+    let hwnd = HWND(w.hwnd.get() as *mut core::ffi::c_void);
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as i32;
+        let want = (ex & !WS_EX_APPWINDOW) | WS_EX_TOOLWINDOW;
+        if ex != want {
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want as isize);
+        }
+    }
+}
+
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        // 工具窗口样式（任务栏/Alt+Tab 隐藏）：每帧读回校验，不对即重写
+        // （首帧过早设置或 winit 后续重写 EXSTYLE 两种情况都覆盖）
+        ensure_toolwindow_style(frame);
         let _ = frame;
         // 托盘菜单事件（控制入口全部在托盘）
         let events: Vec<MenuEvent> = self.tray.as_ref()
