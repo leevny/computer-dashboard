@@ -19,4 +19,4 @@ strip = true
 panic = "abort"
 
 [target.x86_64-pc-windows-gnu.dependencies]
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_System_LibraryLoader", "Win32_System_Performance", "Win32_UI_Controls"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Dxgi", "Win32_System_LibraryLoader", "Win32_System_Performance", "Win32_UI_Controls", "Win32_UI_WindowsAndMessaging"] }
