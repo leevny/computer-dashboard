@@ -3,7 +3,6 @@
 mod gpu;
 
 use eframe::egui;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use std::time::{Duration, Instant};
 use sysinfo::System;
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, Submenu};
@@ -103,17 +102,15 @@ impl Theme {
 
 #[derive(Clone, Copy, PartialEq)]
 enum GlassStyle {
-    Frosted, // 半透明玻璃：系统模糊透出背后内容
-    Liquid,  // 液态玻璃：不透明底 + 浓光晕
-    Hybrid,  // 混合：微透 + 中等光晕
+    Liquid,  // 液态玻璃：光晕最浓
+    Hybrid,  // 混合：中等光晕
 }
 
 impl GlassStyle {
-    const ALL: [GlassStyle; 3] = [GlassStyle::Frosted, GlassStyle::Liquid, GlassStyle::Hybrid];
+    const ALL: [GlassStyle; 2] = [GlassStyle::Liquid, GlassStyle::Hybrid];
 
     fn name(self) -> &'static str {
         match self {
-            GlassStyle::Frosted => "半透明玻璃",
             GlassStyle::Liquid => "液态玻璃",
             GlassStyle::Hybrid => "混合玻璃",
         }
@@ -121,22 +118,11 @@ impl GlassStyle {
     fn ordinal(self) -> usize {
         GlassStyle::ALL.iter().position(|s| *s == self).unwrap()
     }
-    /// (光晕 alpha, 模糊半径, 饱和度, overlay alpha, 底色 alpha)；blur_r=0 表示不画玻璃层。
-    /// 底色 alpha 只作用于 egui 内容层，窗口整体透明度由 uniform alpha 控制。
-    fn params(self) -> (f32, f32, f32, u8, u8) {
+    /// (光晕 alpha, 模糊半径, 饱和度, overlay alpha)
+    fn params(self) -> (f32, f32, f32, u8) {
         match self {
-            GlassStyle::Frosted => (0.20, 0.0, 1.0, 0, 90),
-            GlassStyle::Liquid => (0.55, 32.0, 1.8, 150, 255),
-            GlassStyle::Hybrid => (0.40, 24.0, 1.6, 185, 235),
-        }
-    }
-
-    /// 各风格对应的整窗 uniform alpha
-    fn uniform(self) -> u8 {
-        match self {
-            GlassStyle::Frosted => 225, // 整窗 88% 不透明：背后内容隐约锐利透出
-            GlassStyle::Liquid => 255,
-            GlassStyle::Hybrid => 255,
+            GlassStyle::Liquid => (0.55, 32.0, 1.8, 150),
+            GlassStyle::Hybrid => (0.40, 24.0, 1.6, 185),
         }
     }
 }
@@ -173,8 +159,6 @@ fn main() -> eframe::Result<()> {
                 style: GlassStyle::Hybrid,
                 theme: Theme::Light,
                 tray,
-                acrylic_done: false,
-                layered_alpha: 0,
             }))
         }),
     )
@@ -193,78 +177,6 @@ fn load_cjk(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
-}
-
-/// 分层窗口：WS_EX_LAYERED + uniform alpha，让 GL 内容按透明度真实透出背后。
-/// 实证依据（本机 build 26200）：accent 的 BLURBEHIND/ACRYLIC/TRANSPARENTGRADIENT
-/// 全部渲染固定白层（亮暗背景亮度恒 212），失效；无 accent 时 GL swapchain 的
-/// per-pixel alpha 不参与 DWM 合成（亮暗恒 92）——uniform layered alpha 是唯一通路。
-fn enable_layered(frame: &eframe::Frame) {
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{
-        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE, LWA_ALPHA,
-    };
-    const WS_EX_LAYERED: i32 = 0x0008_0000;
-    #[allow(deprecated)]
-    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
-    let Ok(RawWindowHandle::Win32(w)) = HasRawWindowHandle::raw_window_handle(frame) else { return };
-    let hwnd = HWND(w.hwnd.get() as *mut core::ffi::c_void);
-    unsafe {
-        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as i32;
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (ex | WS_EX_LAYERED) as isize);
-        SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 255, LWA_ALPHA);
-        set_accent(hwnd, true); // 模糊层：半透明档的磨砂来源
-    }
-}
-
-/// accent 模糊层开关（Frosted 需要；其余档关闭，避免白层干扰）
-fn set_accent(hwnd: windows::Win32::Foundation::HWND, on: bool) {
-    #[repr(C)]
-    struct ACCENT_POLICY {
-        accent_state: u32,
-        accent_flags: u32,
-        gradient_color: u32,
-        animation_id: u32,
-    }
-    #[repr(C)]
-    struct WINCOMPATTRIBDATA {
-        attribute: u32,
-        data: *mut core::ffi::c_void,
-        size: usize,
-    }
-    unsafe {
-        let user32 = windows::Win32::System::LibraryLoader::GetModuleHandleA(
-            windows::core::PCSTR(b"user32.dll ".as_ptr()),
-        )
-        .unwrap_or_default();
-        let Some(addr) = windows::Win32::System::LibraryLoader::GetProcAddress(
-            user32,
-            windows::core::PCSTR(b"SetWindowCompositionAttribute ".as_ptr()),
-        ) else { return };
-        let set_attr: extern "system" fn(windows::Win32::Foundation::HWND, *mut WINCOMPATTRIBDATA) -> i32 =
-            core::mem::transmute(addr);
-        let mut policy = ACCENT_POLICY {
-            accent_state: if on { 3 } else { 0 }, // 3 = BLURBEHIND，0 = DISABLED
-            accent_flags: 0,
-            gradient_color: 0,
-            animation_id: 0,
-        };
-        let mut data = WINCOMPATTRIBDATA {
-            attribute: 19, // WCA_ACCENT_POLICY
-            data: &mut policy as *mut ACCENT_POLICY as *mut core::ffi::c_void,
-            size: std::mem::size_of::<ACCENT_POLICY>(),
-        };
-        set_attr(hwnd, &mut data);
-    }
-}
-
-/// 按风格设置 accent 模糊层（Frosted 需要；其余关闭）
-fn set_accent_by_style(frame: &eframe::Frame, style: GlassStyle) {
-    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
-    #[allow(deprecated)]
-    let Ok(RawWindowHandle::Win32(w)) = HasRawWindowHandle::raw_window_handle(frame) else { return };
-    let hwnd = windows::Win32::Foundation::HWND(w.hwnd.get() as *mut core::ffi::c_void);
-    set_accent(hwnd, style == GlassStyle::Frosted);
 }
 
 /// 调整整窗 uniform alpha（255 = 不透明）
@@ -366,12 +278,6 @@ struct App {
     style: GlassStyle,
     theme: Theme,
     tray: Option<TrayUi>,
-    acrylic_done: bool,
-    layered_alpha: u8,
-}
-
-fn uniform_alpha(s: GlassStyle) -> u8 {
-    s.uniform()
 }
 
 #[derive(Default)]
@@ -384,17 +290,7 @@ struct Stats {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        if !self.acrylic_done {
-            self.acrylic_done = true;
-            enable_layered(frame);
-        }
-        if self.layered_alpha != uniform_alpha(self.style) {
-            self.layered_alpha = uniform_alpha(self.style);
-            set_uniform_alpha(frame, self.layered_alpha);
-            if let Some(tray) = &self.tray {
-                let _ = tray; // accent 随风格在下方统一处理
-            }
-        }
+        let _ = frame;
         // 托盘菜单事件（控制入口全部在托盘）
         let events: Vec<MenuEvent> = self.tray.as_ref()
             .map(|t| std::mem::take(&mut *t.events.lock().unwrap()))
@@ -439,15 +335,10 @@ impl eframe::App for App {
         let wait = Duration::from_secs(1).saturating_sub(self.last.elapsed());
         ui.ctx().request_repaint_after(wait.max(Duration::from_millis(33)));
 
-        set_accent_by_style(frame, self.style);
         let pal = self.theme.palette();
-        let (glow_a, blur_r, sat, overlay_a, base_a) = self.style.params();
+        let (glow_a, blur_r, sat, overlay_a) = self.style.params();
 
-        egui::Frame::NONE
-            .fill(egui::Color32::from_rgba_unmultiplied(
-                pal.scrim.r(), pal.scrim.g(), pal.scrim.b(), base_a,
-            ))
-            .show(ui, |ui| {
+        egui::Frame::NONE.fill(pal.scrim).show(ui, |ui| {
             let bg_rect = ui.max_rect();
             let bp = ui.painter();
             // 光晕对齐表盘中心（窗口 224×112，两盘中心各在半区中央）
@@ -509,7 +400,7 @@ impl eframe::App for App {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.0, 0.0, 0.0, 0.0] // 透明底：半透明档经系统 blur 透出背后内容
+        [0.071, 0.086, 0.11, 1.0] // 不透明底
     }
 }
 
