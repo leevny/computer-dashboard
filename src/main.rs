@@ -10,6 +10,17 @@ use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, Predefin
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
 const TRAY_RGBA: &[u8] = include_bytes!("../assets/tray.rgba");
+const HOOK_PS1: &[u8] = include_bytes!("../assets/claude-hook.ps1");
+
+/// hook 事件 → 状态参数（托盘「启用状态灯」一键写入 settings.json 的映射）
+const HOOK_EVENTS: &[(&str, &str)] = &[
+    ("SessionStart", "green"),
+    ("UserPromptSubmit", "yellow"),
+    ("PostToolUse", "yellow"),
+    ("Stop", "green"),
+    ("Notification", "red"),
+    ("SessionEnd", "delete"),
+];
 
 // ---- i18n：系统 UI 语言检测（zh 系→中文，其余→英文），简单字符串表，无框架 ----
 #[derive(Clone, Copy, PartialEq)]
@@ -47,6 +58,7 @@ struct Strings {
     theme_light: &'static str,
     topmost: &'static str,
     quit: &'static str,
+    enable_lights: &'static str,
     light_idle: &'static str,
     light_exec: &'static str,
     light_need: &'static str,
@@ -64,6 +76,7 @@ const ZH: Strings = Strings {
     theme_light: "浅色主题",
     topmost: "窗口置顶",
     quit: "退出",
+    enable_lights: "启用 Claude Code 状态灯",
     light_idle: "空闲",
     light_exec: "执行中",
     light_need: "需要接入",
@@ -81,6 +94,7 @@ const EN: Strings = Strings {
     theme_light: "Light theme",
     topmost: "Always on top",
     quit: "Quit",
+    enable_lights: "Enable Claude status lights",
     light_idle: "Idle",
     light_exec: "Executing",
     light_need: "Needs you",
@@ -209,6 +223,16 @@ impl GlassStyle {
 }
 
 fn main() -> eframe::Result<()> {
+    // CLI 自测/脚本化：sys-gauge.exe --install-hooks | --remove-hooks（无窗口执行后退出）
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--install-hooks" || a == "--remove-hooks") {
+        let enable = args[pos] == "--install-hooks";
+        if let Err(e) = set_hooks_enabled(enable) {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("sys-gauge")
@@ -242,10 +266,83 @@ fn main() -> eframe::Result<()> {
                 style: GlassStyle::Hybrid,
                 theme: Theme::Light,
                 lang,
+                lights_enabled: hooks_installed(),
                 tray,
             }))
         }),
     )
+}
+
+/// 启用/禁用 Claude Code 状态灯 hooks：写 hook 脚本 + 合并全局 settings.json
+/// （先备份 .bak；替换式合并——只清本工具管理的条目，不动用户自己的 hooks）。
+/// hook 脚本为 PowerShell 版（Windows 自带，下载用户无 python 依赖）。
+fn set_hooks_enabled(enable: bool) -> Result<(), String> {
+    use serde_json::Value;
+    let home = std::env::var("USERPROFILE").map_err(|e| e.to_string())?;
+    let light_dir = std::path::PathBuf::from(&home).join(".claude").join("light");
+    std::fs::create_dir_all(light_dir.join("sessions")).map_err(|e| e.to_string())?;
+    let ps1 = light_dir.join("claude-hook.ps1");
+    std::fs::write(&ps1, HOOK_PS1).map_err(|e| e.to_string())?;
+
+    let sp = std::path::PathBuf::from(&home).join(".claude").join("settings.json");
+    let bak = std::path::PathBuf::from(format!("{}.bak", sp.to_string_lossy()));
+    if sp.exists() && !bak.exists() {
+        std::fs::copy(&sp, &bak).map_err(|e| e.to_string())?;
+    }
+    let mut v: Value = if sp.exists() {
+        serde_json::from_str(&std::fs::read_to_string(&sp).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?
+    } else {
+        serde_json::json!({})
+    };
+    let hooks = v.as_object_mut()
+        .ok_or("settings.json root is not an object")?
+        .entry("hooks".to_string())
+        .or_insert_with(|| Value::Object(Default::default()));
+    let hooks_obj = hooks.as_object_mut().ok_or("hooks is not an object")?;
+
+    for (ev, state) in HOOK_EVENTS {
+        let arr = hooks_obj
+            .entry(ev.to_string())
+            .or_insert_with(|| Value::Array(Vec::new()));
+        let arr = arr.as_array_mut().ok_or("hook entry is not an array")?;
+        // 替换式：清除本工具管理的条目（含历史 python 版 claude-hook.py），保留用户自己的 hooks
+        arr.retain(|h| {
+            !h.get("hooks").map_or(false, |inner| {
+                inner.as_array().map_or(false, |items| {
+                    items.iter().any(|i| {
+                        i.get("command").and_then(|c| c.as_str())
+                            .map_or(false, |c| c.contains("claude-hook"))
+                    })
+                })
+            })
+        });
+        if enable {
+            let command = format!(
+                "powershell.exe -NoProfile -ExecutionPolicy Bypass -File \"{}\" {}",
+                ps1.to_string_lossy(),
+                state
+            );
+            arr.push(serde_json::json!({
+                "hooks": [{"type": "command", "command": command, "timeout": 10}]
+            }));
+        }
+    }
+    // 原子写
+    let tmp = std::path::PathBuf::from(format!("{}.tmp", sp.to_string_lossy()));
+    std::fs::write(&tmp, serde_json::to_string_pretty(&v).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &sp).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// settings.json 是否已安装状态灯 hooks
+fn hooks_installed() -> bool {
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    let sp = std::path::PathBuf::from(&home).join(".claude").join("settings.json");
+    std::fs::read_to_string(sp)
+        .map(|s| s.contains("claude-hook.ps1"))
+        .unwrap_or(false)
 }
 
 /// 补充 CJK 字体（默认字体不含中文，菜单/标签需要）
@@ -265,6 +362,7 @@ fn load_cjk(ctx: &egui::Context) {
 
 /// 系统托盘：右下角小图标 + 右键菜单（玻璃风格单选 / 主题单选 / 置顶 / 退出）
 struct TrayUi {
+    enable_item: CheckMenuItem,
     status_item: MenuItem,
     style_items: Vec<CheckMenuItem>,
     theme_items: Vec<CheckMenuItem>,
@@ -287,6 +385,7 @@ impl TrayUi {
             .map(|t| CheckMenuItem::new(t.name(lang), true, *t == Theme::Dark, None))
             .collect();
         let status_item = MenuItem::new(s.light_none, false, None);
+        let enable_item = CheckMenuItem::new(s.enable_lights, true, false, None);
         let check_top = CheckMenuItem::new(s.topmost, true, true, None);
         let quit = MenuItem::new(s.quit, true, None);
         let style_sub = Submenu::new(s.glass_sub, true);
@@ -299,6 +398,8 @@ impl TrayUi {
         }
         let mut menu = Menu::new();
         menu.append(&status_item).map_err(|e| e.to_string())?;
+        menu.append(&PredefinedMenuItem::separator()).map_err(|e| e.to_string())?;
+        menu.append(&enable_item).map_err(|e| e.to_string())?;
         menu.append(&PredefinedMenuItem::separator()).map_err(|e| e.to_string())?;
         menu.append(&style_sub).map_err(|e| e.to_string())?;
         menu.append(&theme_sub).map_err(|e| e.to_string())?;
@@ -323,6 +424,7 @@ impl TrayUi {
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self {
+            enable_item,
             status_item,
             style_items,
             theme_items,
@@ -334,14 +436,15 @@ impl TrayUi {
         })
     }
 
-    /// 同步单选组勾选状态到当前风格/主题
-    fn sync_checks(&self, style: GlassStyle, theme: Theme) {
+    /// 同步勾选状态：风格/主题单选 + 状态灯启用开关
+    fn sync_checks(&self, style: GlassStyle, theme: Theme, lights_enabled: bool) {
         for (i, it) in self.style_items.iter().enumerate() {
             it.set_checked(i == style.ordinal());
         }
         for (i, it) in self.theme_items.iter().enumerate() {
             it.set_checked(i == theme.ordinal());
         }
+        self.enable_item.set_checked(lights_enabled);
     }
 }
 
@@ -356,6 +459,7 @@ struct App {
     style: GlassStyle,
     theme: Theme,
     lang: Lang,
+    lights_enabled: bool,
     tray: Option<TrayUi>,
 }
 
@@ -414,6 +518,13 @@ impl eframe::App for App {
                         self.theme = [Theme::Dark, Theme::Light][i];
                     }
                 }
+                if ev.id == tray.enable_item.id() {
+                    let want = !self.lights_enabled;
+                    match set_hooks_enabled(want) {
+                        Ok(()) => self.lights_enabled = want,
+                        Err(_) => { /* ponytail: 安装失败静默，勾选状态由 sync_checks 回滚 */ }
+                    }
+                }
                 if ev.id == tray.topmost {
                     self.set_topmost(ui, !self.topmost);
                 } else if ev.id == tray.quit {
@@ -423,7 +534,7 @@ impl eframe::App for App {
             }
         }
         if let Some(tray) = &self.tray {
-            tray.sync_checks(self.style, self.theme);
+            tray.sync_checks(self.style, self.theme, self.lights_enabled);
         }
         if self.last.elapsed() >= Duration::from_secs(1) {
             self.last = Instant::now();
