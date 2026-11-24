@@ -48,6 +48,12 @@ cargo build --release
 
 产物 `target/release/sys-gauge.exe`，双击运行（GUI subsystem，无控制台窗口）。
 
+
+## 字体子集
+
+`assets/ui-cjk.ttf` 是由 `tools/subset-font.py` 从 `msyh.ttc` 子集化的 ~20 KB 字体
+（字符集自动从源码字符串提取）。新增中文 UI 文案后请重跑该脚本重新生成，否则新字形会显示为豆腐块。
+
 ## License
 
 [MIT](LICENSE)

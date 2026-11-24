@@ -47,6 +47,13 @@ cargo build --release
 
 Binary: `target/release/sys-gauge.exe` — double-click to run (GUI subsystem, no console window).
 
+
+## Font subset
+
+`assets/ui-cjk.ttf` is a ~20 KB subset generated from `msyh.ttc` by `tools/subset-font.py`
+(character set auto-extracted from source strings). Regenerate it after adding new
+Chinese UI strings — otherwise new glyphs render as tofu boxes.
+
 ## License
 
 [MIT](LICENSE)

@@ -251,14 +251,14 @@ fn main() -> eframe::Result<()> {
 /// 补充 CJK 字体（默认字体不含中文，菜单/标签需要）
 fn load_cjk(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
-    for path in ["C:\\Windows\\Fonts\\msyh.ttc", "C:\\Windows\\Fonts\\simhei.ttf"] {
-        if let Ok(data) = std::fs::read(path) {
-            fonts.font_data.insert("cjk".into(), egui::FontData::from_owned(data).into());
-            for fam in fonts.families.values_mut() {
-                fam.push("cjk".into());
-            }
-            break;
-        }
+    // UI 子集字体（~20KB，tools/subset-font.py 从 msyh.ttc 子集化，字符集取自源码
+    // 字符串；新增中文文案后重跑该脚本）——替代 19.7MB 的 msyh.ttc 全量驻留
+    fonts.font_data.insert(
+        "cjk".into(),
+        egui::FontData::from_static(include_bytes!("../assets/ui-cjk.ttf")).into(),
+    );
+    for fam in fonts.families.values_mut() {
+        fam.push("cjk".into());
     }
     ctx.set_fonts(fonts);
 }
