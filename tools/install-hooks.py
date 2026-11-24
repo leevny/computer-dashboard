@@ -25,20 +25,21 @@ if os.path.exists(settings_path):
         settings = json.load(f)
 
 py = sys.executable.replace("\\", "/")
-events = {"SessionStart": "yellow", "UserPromptSubmit": "yellow", "Stop": "green",
+events = {"SessionStart": "green", "UserPromptSubmit": "yellow", "Stop": "green",
           "Notification": "red", "SessionEnd": "delete"}
 hooks = settings.setdefault("hooks", {})
 added = 0
 for event, state in events.items():
     cmd = f'{py} "{hook_dst}" {state}'
     lst = hooks.setdefault(event, [])
-    exists = any(
-        isinstance(h, dict) and any(
-            hh.get("command") == cmd for hh in h.get("hooks", []) if isinstance(hh, dict))
-        for h in lst)
-    if not exists:
-        lst.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
-        added += 1
+    # 先移除本脚本管理的旧条目（参数映射修正时防止新旧残留），再插入正确条目
+    for h in lst[:]:
+        if isinstance(h, dict) and any(
+                "claude-hook.py" in hh.get("command", "")
+                for hh in h.get("hooks", []) if isinstance(hh, dict)):
+            lst.remove(h)
+    lst.append({"hooks": [{"type": "command", "command": cmd, "timeout": 10}]})
+    added += 1
 
 # 4) 原子写
 tmp = settings_path + ".tmp"
