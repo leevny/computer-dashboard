@@ -102,19 +102,16 @@ impl Theme {
 
 #[derive(Clone, Copy, PartialEq)]
 enum GlassStyle {
-    Solid,   // 实底：无玻璃层，纯色面板
-    Frosted, // 半透明玻璃：轻光晕
-    Liquid,  // 液态玻璃：光晕最浓
-    Hybrid,  // 混合
+    Frosted, // 半透明玻璃：系统模糊透出背后内容
+    Liquid,  // 液态玻璃：不透明底 + 浓光晕
+    Hybrid,  // 混合：微透 + 中等光晕
 }
 
 impl GlassStyle {
-    const ALL: [GlassStyle; 4] =
-        [GlassStyle::Solid, GlassStyle::Frosted, GlassStyle::Liquid, GlassStyle::Hybrid];
+    const ALL: [GlassStyle; 3] = [GlassStyle::Frosted, GlassStyle::Liquid, GlassStyle::Hybrid];
 
     fn name(self) -> &'static str {
         match self {
-            GlassStyle::Solid => "实底",
             GlassStyle::Frosted => "半透明玻璃",
             GlassStyle::Liquid => "液态玻璃",
             GlassStyle::Hybrid => "混合玻璃",
@@ -123,13 +120,12 @@ impl GlassStyle {
     fn ordinal(self) -> usize {
         GlassStyle::ALL.iter().position(|s| *s == self).unwrap()
     }
-    /// (光晕 alpha, 模糊半径, 饱和度, overlay alpha)
-    fn params(self) -> (f32, f32, f32, u8) {
+    /// (光晕 alpha, 模糊半径, 饱和度, overlay alpha, 底色 alpha)；blur_r=0 表示不画玻璃层
+    fn params(self) -> (f32, f32, f32, u8, u8) {
         match self {
-            GlassStyle::Solid => (0.0, 0.0, 1.0, 0),
-            GlassStyle::Frosted => (0.22, 18.0, 1.3, 200),
-            GlassStyle::Liquid => (0.55, 32.0, 1.8, 150),
-            GlassStyle::Hybrid => (0.40, 24.0, 1.6, 185),
+            GlassStyle::Frosted => (0.20, 0.0, 1.0, 0, 85),
+            GlassStyle::Liquid => (0.55, 32.0, 1.8, 150, 255),
+            GlassStyle::Hybrid => (0.40, 24.0, 1.6, 185, 235),
         }
     }
 }
@@ -163,9 +159,10 @@ fn main() -> eframe::Result<()> {
                 stats: Stats::default(),
                 last: Instant::now(),
                 topmost: true,
-                style: GlassStyle::Hybrid,
-                theme: Theme::Dark,
+                style: GlassStyle::Liquid,
+                theme: Theme::Light,
                 tray,
+                acrylic_done: false,
             }))
         }),
     )
@@ -184,6 +181,57 @@ fn load_cjk(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
+}
+
+/// DWM blur behind：把窗口背后的内容模糊后透进来（半透明玻璃档的前提）
+#[allow(deprecated)]
+fn enable_blur_behind(frame: &eframe::Frame) {
+    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
+    #[repr(C)]
+    struct ACCENT_POLICY {
+        accent_state: u32,
+        accent_flags: u32,
+        gradient_color: u32,
+        animation_id: u32,
+    }
+    #[repr(C)]
+    struct WINCOMPATTRIBDATA {
+        attribute: u32,
+        data: *mut core::ffi::c_void,
+        size: usize,
+    }
+    let Ok(RawWindowHandle::Win32(w)) = frame.raw_window_handle() else { return };
+    let hwnd = windows::Win32::Foundation::HWND(w.hwnd.get() as *mut core::ffi::c_void);
+    unsafe {
+        use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
+        use windows::Win32::UI::Controls::MARGINS;
+        let _ = DwmExtendFrameIntoClientArea(
+            hwnd,
+            &MARGINS { cxLeftWidth: -1, cxRightWidth: -1, cyTopHeight: -1, cyBottomHeight: -1 },
+        );
+        let user32 = windows::Win32::System::LibraryLoader::GetModuleHandleA(
+            windows::core::PCSTR(b"user32.dll\0".as_ptr()),
+        )
+        .unwrap_or_default();
+        let Some(addr) = windows::Win32::System::LibraryLoader::GetProcAddress(
+            user32,
+            windows::core::PCSTR(b"SetWindowCompositionAttribute\0".as_ptr()),
+        ) else { return };
+        let set_attr: extern "system" fn(windows::Win32::Foundation::HWND, *mut WINCOMPATTRIBDATA) -> i32 =
+            core::mem::transmute(addr);
+        let mut policy = ACCENT_POLICY {
+            accent_state: 3, // ACCENT_ENABLE_BLURBEHIND
+            accent_flags: 0,
+            gradient_color: 0,
+            animation_id: 0,
+        };
+        let mut data = WINCOMPATTRIBDATA {
+            attribute: 19, // WCA_ACCENT_POLICY
+            data: &mut policy as *mut ACCENT_POLICY as *mut core::ffi::c_void,
+            size: std::mem::size_of::<ACCENT_POLICY>(),
+        };
+        set_attr(hwnd, &mut data);
+    }
 }
 
 /// 系统托盘：右下角小图标 + 右键菜单（玻璃风格单选 / 主题单选 / 置顶 / 退出）
@@ -271,6 +319,7 @@ struct App {
     style: GlassStyle,
     theme: Theme,
     tray: Option<TrayUi>,
+    acrylic_done: bool,
 }
 
 #[derive(Default)]
@@ -283,6 +332,10 @@ struct Stats {
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        if !self.acrylic_done {
+            self.acrylic_done = true;
+            enable_blur_behind(frame);
+        }
         // 托盘菜单事件（控制入口全部在托盘）
         let events: Vec<MenuEvent> = self.tray.as_ref()
             .map(|t| std::mem::take(&mut *t.events.lock().unwrap()))
@@ -328,9 +381,13 @@ impl eframe::App for App {
         ui.ctx().request_repaint_after(wait.max(Duration::from_millis(33)));
 
         let pal = self.theme.palette();
-        let (glow_a, blur_r, sat, overlay_a) = self.style.params();
+        let (glow_a, blur_r, sat, overlay_a, base_a) = self.style.params();
 
-        egui::Frame::NONE.fill(pal.scrim).show(ui, |ui| {
+        egui::Frame::NONE
+            .fill(egui::Color32::from_rgba_unmultiplied(
+                pal.scrim.r(), pal.scrim.g(), pal.scrim.b(), base_a,
+            ))
+            .show(ui, |ui| {
             let bg_rect = ui.max_rect();
             let bp = ui.painter();
             // 光晕对齐表盘中心（窗口 224×112，两盘中心各在半区中央）
@@ -338,7 +395,7 @@ impl eframe::App for App {
             let c2 = bg_rect.left_center() + egui::vec2(168.0, 9.0);
             bp.circle_filled(c1, 50.0, pal.cpu.gamma_multiply(glow_a));
             bp.circle_filled(c2, 50.0, pal.mem.gamma_multiply(glow_a));
-            if self.style != GlassStyle::Solid {
+            if blur_r > 0.0 {
                 use egui_bg_layer::{presets, BG_Panel};
                 BG_Panel::new(presets::gaussian_blur(blur_r).then(presets::saturation(sat)))
                     .corner_radius(12.0)
@@ -392,7 +449,7 @@ impl eframe::App for App {
     }
 
     fn clear_color(&self, _visuals: &egui::Visuals) -> [f32; 4] {
-        [0.071, 0.086, 0.11, 1.0] // #12161C 不透明底
+        [0.0, 0.0, 0.0, 0.0] // 透明底：半透明档经系统 blur 透出背后内容
     }
 }
 
