@@ -7,6 +7,15 @@ import json, sys, os, datetime
 try:
     state = sys.argv[1] if len(sys.argv) > 1 else "yellow"
     d = json.load(sys.stdin)
+    if state == "red":
+        # Notification 分级：permission 类=需要接入(红)；idle 等输入类=空闲(绿，与 Stop 一致)；未知保底红
+        msg = str(d.get("message", "")).lower()
+        if "permission" in msg:
+            state = "red"
+        elif "waiting for input" in msg or "waiting for your input" in msg:
+            state = "green"
+        else:
+            state = "red"
     sid = str(d.get("session_id", ""))[:48] or "unknown"
     p = os.path.join(os.path.expanduser("~"), ".claude", "light", "sessions")
     os.makedirs(p, exist_ok=True)

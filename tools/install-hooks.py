@@ -25,8 +25,8 @@ if os.path.exists(settings_path):
         settings = json.load(f)
 
 py = sys.executable.replace("\\", "/")
-events = {"SessionStart": "green", "UserPromptSubmit": "yellow", "Stop": "green",
-          "Notification": "red", "SessionEnd": "delete"}
+events = {"SessionStart": "green", "UserPromptSubmit": "yellow", "PostToolUse": "yellow",
+          "Stop": "green", "Notification": "red", "SessionEnd": "delete"}
 hooks = settings.setdefault("hooks", {})
 added = 0
 for event, state in events.items():
@@ -46,4 +46,4 @@ tmp = settings_path + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(settings, f, indent=2, ensure_ascii=False)
 os.replace(tmp, settings_path)
-print(f"hooks merged: +{added} (SessionStart/UserPromptSubmit=yellow, Stop=green, Notification=red, SessionEnd=delete)")
+print(f"hooks merged: +{added} (SessionStart=green, UserPromptSubmit/PostToolUse=yellow, Stop=green, Notification=分级, SessionEnd=delete)")
