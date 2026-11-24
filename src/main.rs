@@ -5,30 +5,134 @@ mod gpu;
 use eframe::egui;
 use std::time::{Duration, Instant};
 use sysinfo::System;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, Submenu};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
 const TRAY_RGBA: &[u8] = include_bytes!("../assets/tray.rgba");
-
-// ---- 配色：低饱和四色（OKLCH 生成，已过色觉/对比度校验），表盘画在深色玻璃上 ----
-const SCRIM: egui::Color32 = egui::Color32::from_rgb(0x12, 0x16, 0x1C);
-const CPU: egui::Color32 = egui::Color32::from_rgb(0x35, 0x85, 0xC9);
-const MEM: egui::Color32 = egui::Color32::from_rgb(0x28, 0xA1, 0x6D);
-const GPU: egui::Color32 = egui::Color32::from_rgb(0xC0, 0x85, 0x1F);
-const VRAM: egui::Color32 = egui::Color32::from_rgb(0xBF, 0x6A, 0xA5);
-const RED: egui::Color32 = egui::Color32::from_rgb(0xA8, 0x43, 0x43); // 红区：低调砖红
-const TRACK: egui::Color32 = egui::Color32::from_rgb(0x46, 0x50, 0x5E);
-const TRACK_IN: egui::Color32 = egui::Color32::from_rgb(0x33, 0x3B, 0x47);
-const TICK_MAJOR: egui::Color32 = egui::Color32::from_rgb(0xD5, 0xDC, 0xE5);
-const TICK_MINOR: egui::Color32 = egui::Color32::from_rgb(0x4A, 0x55, 0x63);
-const TICK_IN: egui::Color32 = egui::Color32::from_rgb(0x5E, 0x6A, 0x7D);
-const NUM: egui::Color32 = egui::Color32::from_rgb(0x8A, 0x94, 0xA6);
-const INK: egui::Color32 = egui::Color32::from_rgb(0xE6, 0xED, 0xF3);
 
 const A0: f32 = -120.0; // 表盘起始角：0° 朝上，顺时针为正
 const SWEEP: f32 = 240.0;
 const R_OUTER: f32 = 42.0;
 const R_INNER: f32 = 22.0;
+
+// ---- 配色：两套主题均为低饱和四色（OKLCH 生成，已过色觉/对比度校验） ----
+struct Palette {
+    cpu: egui::Color32,
+    gpu: egui::Color32,
+    mem: egui::Color32,
+    vram: egui::Color32,
+    red: egui::Color32,
+    track: egui::Color32,
+    track_in: egui::Color32,
+    tick_major: egui::Color32,
+    tick_minor: egui::Color32,
+    tick_in: egui::Color32,
+    num: egui::Color32,
+    ink: egui::Color32,
+    scrim: egui::Color32,
+    glass_tint: egui::Color32,
+}
+
+const DARK: Palette = Palette {
+    cpu: egui::Color32::from_rgb(0x35, 0x85, 0xC9),
+    gpu: egui::Color32::from_rgb(0xC0, 0x85, 0x1F),
+    mem: egui::Color32::from_rgb(0x28, 0xA1, 0x6D),
+    vram: egui::Color32::from_rgb(0xBF, 0x6A, 0xA5),
+    red: egui::Color32::from_rgb(0xA8, 0x43, 0x43),
+    track: egui::Color32::from_rgb(0x46, 0x50, 0x5E),
+    track_in: egui::Color32::from_rgb(0x33, 0x3B, 0x47),
+    tick_major: egui::Color32::from_rgb(0xD5, 0xDC, 0xE5),
+    tick_minor: egui::Color32::from_rgb(0x4A, 0x55, 0x63),
+    tick_in: egui::Color32::from_rgb(0x5E, 0x6A, 0x7D),
+    num: egui::Color32::from_rgb(0x8A, 0x94, 0xA6),
+    ink: egui::Color32::from_rgb(0xE6, 0xED, 0xF3),
+    scrim: egui::Color32::from_rgb(0x12, 0x16, 0x1C),
+    glass_tint: egui::Color32::from_rgb(0x12, 0x16, 0x1C),
+};
+
+const LIGHT: Palette = Palette {
+    cpu: egui::Color32::from_rgb(0x23, 0x76, 0xB9),
+    gpu: egui::Color32::from_rgb(0x9D, 0x64, 0x00),
+    mem: egui::Color32::from_rgb(0x00, 0x88, 0x56),
+    vram: egui::Color32::from_rgb(0xA2, 0x50, 0x89),
+    red: egui::Color32::from_rgb(0xB3, 0x40, 0x3C),
+    track: egui::Color32::from_rgb(0xC3, 0xCC, 0xD8),
+    track_in: egui::Color32::from_rgb(0xA8, 0xB3, 0xC1),
+    tick_major: egui::Color32::from_rgb(0x3D, 0x46, 0x54),
+    tick_minor: egui::Color32::from_rgb(0xB5, 0xBF, 0xCA),
+    tick_in: egui::Color32::from_rgb(0x92, 0x9D, 0xAB),
+    num: egui::Color32::from_rgb(0x5A, 0x64, 0x72),
+    ink: egui::Color32::from_rgb(0x1F, 0x26, 0x30),
+    scrim: egui::Color32::from_rgb(0xE9, 0xED, 0xF2),
+    glass_tint: egui::Color32::from_rgb(0xE9, 0xED, 0xF2),
+};
+
+#[derive(Clone, Copy, PartialEq)]
+enum Theme {
+    Dark,
+    Light,
+}
+
+impl Theme {
+    fn name(self) -> &'static str {
+        match self {
+            Theme::Dark => "深色主题",
+            Theme::Light => "浅色主题",
+        }
+    }
+    fn next(self) -> Self {
+        match self {
+            Theme::Dark => Theme::Light,
+            Theme::Light => Theme::Dark,
+        }
+    }
+    fn palette(self) -> &'static Palette {
+        match self {
+            Theme::Dark => &DARK,
+            Theme::Light => &LIGHT,
+        }
+    }
+    fn ordinal(self) -> usize {
+        match self {
+            Theme::Dark => 0,
+            Theme::Light => 1,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum GlassStyle {
+    Solid,   // 实底：无玻璃层，纯色面板
+    Frosted, // 半透明玻璃：轻光晕
+    Liquid,  // 液态玻璃：光晕最浓
+    Hybrid,  // 混合
+}
+
+impl GlassStyle {
+    const ALL: [GlassStyle; 4] =
+        [GlassStyle::Solid, GlassStyle::Frosted, GlassStyle::Liquid, GlassStyle::Hybrid];
+
+    fn name(self) -> &'static str {
+        match self {
+            GlassStyle::Solid => "实底",
+            GlassStyle::Frosted => "半透明玻璃",
+            GlassStyle::Liquid => "液态玻璃",
+            GlassStyle::Hybrid => "混合玻璃",
+        }
+    }
+    fn ordinal(self) -> usize {
+        GlassStyle::ALL.iter().position(|s| *s == self).unwrap()
+    }
+    /// (光晕 alpha, 模糊半径, 饱和度, overlay alpha)
+    fn params(self) -> (f32, f32, f32, u8) {
+        match self {
+            GlassStyle::Solid => (0.0, 0.0, 1.0, 0),
+            GlassStyle::Frosted => (0.22, 18.0, 1.3, 200),
+            GlassStyle::Liquid => (0.55, 32.0, 1.8, 150),
+            GlassStyle::Hybrid => (0.40, 24.0, 1.6, 185),
+        }
+    }
+}
 
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
@@ -60,6 +164,7 @@ fn main() -> eframe::Result<()> {
                 last: Instant::now(),
                 topmost: true,
                 style: GlassStyle::Hybrid,
+                theme: Theme::Dark,
                 tray,
             }))
         }),
@@ -81,25 +186,42 @@ fn load_cjk(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
-/// 系统托盘：右下角小图标 + 右键菜单（风格切换 / 置顶 / 退出）
+/// 系统托盘：右下角小图标 + 右键菜单（玻璃风格单选 / 主题单选 / 置顶 / 退出）
 struct TrayUi {
-    style: MenuId,
+    style_items: Vec<CheckMenuItem>,
+    theme_items: Vec<CheckMenuItem>,
     topmost: MenuId,
-    quit: MenuId,
     check_top: CheckMenuItem,
+    quit: MenuId,
     events: std::sync::Arc<std::sync::Mutex<Vec<MenuEvent>>>,
     _tray: TrayIcon,
 }
 
 impl TrayUi {
     fn new(ctx: &egui::Context) -> Result<Self, String> {
-        let style = MenuItem::new("切换玻璃风格", true, None);
+        let style_items: Vec<CheckMenuItem> = GlassStyle::ALL
+            .iter()
+            .map(|s| CheckMenuItem::new(s.name(), true, *s == GlassStyle::Hybrid, None))
+            .collect();
+        let theme_items: Vec<CheckMenuItem> = [Theme::Dark, Theme::Light]
+            .iter()
+            .map(|t| CheckMenuItem::new(t.name(), true, *t == Theme::Dark, None))
+            .collect();
         let check_top = CheckMenuItem::new("窗口置顶", true, true, None);
         let quit = MenuItem::new("退出", true, None);
+        let style_sub = Submenu::new("玻璃风格", true);
+        let theme_sub = Submenu::new("主题", true);
+        for it in &style_items {
+            style_sub.append(it).map_err(|e| e.to_string())?;
+        }
+        for it in &theme_items {
+            theme_sub.append(it).map_err(|e| e.to_string())?;
+        }
         let mut menu = Menu::new();
-        menu.append(&style).map_err(|e| e.to_string())?;
-        menu.append(&check_top).map_err(|e| e.to_string())?;
+        menu.append(&style_sub).map_err(|e| e.to_string())?;
+        menu.append(&theme_sub).map_err(|e| e.to_string())?;
         menu.append(&quit).map_err(|e| e.to_string())?;
+        menu.append(&check_top).map_err(|e| e.to_string())?;
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let queue = events.clone();
         let repaint_ctx = ctx.clone();
@@ -118,59 +240,25 @@ impl TrayUi {
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self {
-            style: style.id().clone(),
+            style_items,
+            theme_items,
             topmost: check_top.id().clone(),
-            quit: quit.id().clone(),
             check_top,
+            quit: quit.id().clone(),
             events,
             _tray,
         })
     }
-}
 
-#[derive(Clone, Copy, PartialEq)]
-enum GlassStyle {
-    Frosted, // 毛玻璃：染色最淡，背景透出最多
-    Liquid,  // 液态玻璃：内部光晕主导，发光玻璃面板
-    Hybrid,  // 混合
-}
-
-impl GlassStyle {
-    fn name(self) -> &'static str {
-        match self {
-            GlassStyle::Frosted => "毛玻璃",
-            GlassStyle::Liquid => "液态玻璃",
-            GlassStyle::Hybrid => "混合",
+    /// 同步单选组勾选状态到当前风格/主题
+    fn sync_checks(&self, style: GlassStyle, theme: Theme) {
+        for (i, it) in self.style_items.iter().enumerate() {
+            it.set_checked(i == style.ordinal());
+        }
+        for (i, it) in self.theme_items.iter().enumerate() {
+            it.set_checked(i == theme.ordinal());
         }
     }
-    fn next(self) -> Self {
-        match self {
-            GlassStyle::Frosted => GlassStyle::Liquid,
-            GlassStyle::Liquid => GlassStyle::Hybrid,
-            GlassStyle::Hybrid => GlassStyle::Frosted,
-        }
-    }
-    /// (光晕 alpha, 模糊半径, 饱和度, overlay alpha)
-    fn params(self) -> (f32, f32, f32, u8) {
-        match self {
-            GlassStyle::Frosted => (0.22, 18.0, 1.3, 200),
-            GlassStyle::Liquid => (0.55, 32.0, 1.8, 150),
-            GlassStyle::Hybrid => (0.40, 24.0, 1.6, 185),
-        }
-    }
-}
-
-fn disp_text(i: usize, disp: &[f32; 4], mem_total_gb: f64, vram_total: u64) -> String {
-    match i {
-        0 => format!("{:.0}%", disp[0]),
-        1 => format!("{:.0}%", disp[1]),
-        2 => format!("{:.1}", disp[2] * mem_total_gb as f32 / 100.0),
-        _ => format!("{:.1}", disp[3] * vram_total as f32 / 100.0 / 1073741824.0),
-    }
-}
-
-fn mono(size: f32, text: impl Into<String>) -> egui::RichText {
-    egui::RichText::new(text).font(egui::FontId::new(size, egui::FontFamily::Monospace))
 }
 
 struct App {
@@ -181,6 +269,7 @@ struct App {
     last: Instant,
     topmost: bool,
     style: GlassStyle,
+    theme: Theme,
     tray: Option<TrayUi>,
 }
 
@@ -189,27 +278,37 @@ struct Stats {
     cpu: f32,
     gpu_pct: f32,
     mem_pct: f32,
-    mem_total_gb: f64,
     vram_pct: f32,
 }
 
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
-        // 托盘菜单事件（窗口右键菜单已废弃，控制入口全部在托盘）
+        // 托盘菜单事件（控制入口全部在托盘）
         let events: Vec<MenuEvent> = self.tray.as_ref()
             .map(|t| std::mem::take(&mut *t.events.lock().unwrap()))
             .unwrap_or_default();
         for ev in events {
             if let Some(tray) = &self.tray {
-                if ev.id == tray.style {
-                    self.style = self.style.next();
-                } else if ev.id == tray.topmost {
+                for (i, item) in tray.style_items.iter().enumerate() {
+                    if ev.id == *item.id() {
+                        self.style = GlassStyle::ALL[i];
+                    }
+                }
+                for (i, item) in tray.theme_items.iter().enumerate() {
+                    if ev.id == *item.id() {
+                        self.theme = [Theme::Dark, Theme::Light][i];
+                    }
+                }
+                if ev.id == tray.topmost {
                     self.set_topmost(ui, !self.topmost);
                 } else if ev.id == tray.quit {
                     // ponytail: eframe 退出流程销毁 TrayIcon 时与托盘消息窗口死锁（实测卡死），直接结束进程
                     std::process::exit(0);
                 }
             }
+        }
+        if let Some(tray) = &self.tray {
+            tray.sync_checks(self.style, self.theme);
         }
         if self.last.elapsed() >= Duration::from_secs(1) {
             self.last = Instant::now();
@@ -228,36 +327,44 @@ impl eframe::App for App {
         let wait = Duration::from_secs(1).saturating_sub(self.last.elapsed());
         ui.ctx().request_repaint_after(wait.max(Duration::from_millis(33)));
 
+        let pal = self.theme.palette();
         let (glow_a, blur_r, sat, overlay_a) = self.style.params();
 
-        egui::Frame::NONE.fill(SCRIM).show(ui, |ui| {
+        egui::Frame::NONE.fill(pal.scrim).show(ui, |ui| {
             let bg_rect = ui.max_rect();
             let bp = ui.painter();
             // 光晕对齐表盘中心（窗口 224×112，两盘中心各在半区中央）
             let c1 = bg_rect.left_center() + egui::vec2(56.0, 9.0);
             let c2 = bg_rect.left_center() + egui::vec2(168.0, 9.0);
-            bp.circle_filled(c1, 50.0, CPU.gamma_multiply(glow_a));
-            bp.circle_filled(c2, 50.0, MEM.gamma_multiply(glow_a));
-            use egui_bg_layer::{presets, BG_Panel};
-            BG_Panel::new(presets::gaussian_blur(blur_r).then(presets::saturation(sat)))
-                .corner_radius(12.0)
-                .overlay(egui::Color32::from_rgba_unmultiplied(0x12, 0x16, 0x1C, overlay_a))
-                .paint(ui);
-            // egui_bg_layer 的 shader pass 不恢复 glViewport，会把后续绘制挤到屏幕外——手动还原
-            let restore = egui_glow::CallbackFn::new(move |info, painter| unsafe {
-                use eframe::glow::HasContext;
-                let gl: &eframe::glow::Context = painter.gl();
-                gl.viewport(0, 0, info.screen_size_px[0] as i32, info.screen_size_px[1] as i32);
-            });
-            ui.painter().add(egui::PaintCallback {
-                rect: egui::Rect::EVERYTHING,
-                callback: std::sync::Arc::new(restore),
-            });
-            // 玻璃层之上的柔光晕芯（同心圆渐变），呼应表盘
-            for (cc, col) in [(c1, CPU), (c2, MEM)] {
-                for k in 0..3u32 {
-                    let a = (glow_a * 0.55 * (1.0 - k as f32 * 0.33)) as u8;
-                    bp.circle_filled(cc, 44.0 - k as f32 * 7.0, col.gamma_multiply(a as f32 / 255.0));
+            bp.circle_filled(c1, 50.0, pal.cpu.gamma_multiply(glow_a));
+            bp.circle_filled(c2, 50.0, pal.mem.gamma_multiply(glow_a));
+            if self.style != GlassStyle::Solid {
+                use egui_bg_layer::{presets, BG_Panel};
+                BG_Panel::new(presets::gaussian_blur(blur_r).then(presets::saturation(sat)))
+                    .corner_radius(12.0)
+                    .overlay(egui::Color32::from_rgba_unmultiplied(
+                        pal.glass_tint.r(),
+                        pal.glass_tint.g(),
+                        pal.glass_tint.b(),
+                        overlay_a,
+                    ))
+                    .paint(ui);
+                // egui_bg_layer 的 shader pass 不恢复 glViewport，会把后续绘制挤到屏幕外——手动还原
+                let restore = egui_glow::CallbackFn::new(move |info, painter| unsafe {
+                    use eframe::glow::HasContext;
+                    let gl: &eframe::glow::Context = painter.gl();
+                    gl.viewport(0, 0, info.screen_size_px[0] as i32, info.screen_size_px[1] as i32);
+                });
+                ui.painter().add(egui::PaintCallback {
+                    rect: egui::Rect::EVERYTHING,
+                    callback: std::sync::Arc::new(restore),
+                });
+                // 玻璃层之上的柔光晕芯（同心圆渐变），呼应表盘
+                for (cc, col) in [(c1, pal.cpu), (c2, pal.mem)] {
+                    for k in 0..3u32 {
+                        let a = (glow_a * 0.55 * (1.0 - k as f32 * 0.33)) as u8;
+                        bp.circle_filled(cc, 44.0 - k as f32 * 7.0, col.gamma_multiply(a as f32 / 255.0));
+                    }
                 }
             }
 
@@ -274,12 +381,12 @@ impl eframe::App for App {
                 let p = &ui.painter().clone();
                 let (r1, _) = ui.allocate_exact_size(egui::vec2(w, 106.0), egui::Sense::hover());
                 let c1 = r1.center() + egui::vec2(0.0, 4.0);
-                draw_gauge(p, c1, disp[0], CPU, disp[1], GPU);
-                readout(p, c1, &disp_text(0, &disp, self.stats.mem_total_gb, self.vram_total), CPU, &disp_text(1, &disp, self.stats.mem_total_gb, self.vram_total), GPU);
+                draw_gauge(p, c1, disp[0], pal.cpu, disp[1], pal.gpu, pal);
+                readout(p, c1, ("CPU", disp[0], pal.cpu), ("GPU", disp[1], pal.gpu));
                 let (r2, _) = ui.allocate_exact_size(egui::vec2(w, 106.0), egui::Sense::hover());
                 let c2 = r2.center() + egui::vec2(0.0, 4.0);
-                draw_gauge(p, c2, disp[2], MEM, disp[3], VRAM);
-                readout(p, c2, &disp_text(2, &disp, self.stats.mem_total_gb, self.vram_total), MEM, &disp_text(3, &disp, self.stats.mem_total_gb, self.vram_total), VRAM);
+                draw_gauge(p, c2, disp[2], pal.mem, disp[3], pal.vram, pal);
+                readout(p, c2, ("内存", disp[2], pal.mem), ("显存", disp[3], pal.vram));
             });
         });
     }
@@ -290,21 +397,11 @@ impl eframe::App for App {
 }
 
 impl App {
-    fn target(&self, i: usize) -> f32 {
-        match i {
-            0 => self.stats.cpu,
-            1 => self.stats.gpu_pct,
-            2 => self.stats.mem_pct,
-            _ => self.stats.vram_pct,
-        }
-    }
-
     fn sample(&mut self) {
         self.sys.refresh_cpu_usage();
         self.sys.refresh_memory();
         self.stats.cpu = self.sys.global_cpu_usage();
         let mem_total = self.sys.total_memory() as f64;
-        self.stats.mem_total_gb = mem_total / 1073741824.0;
         self.stats.mem_pct = (self.sys.used_memory() as f64 / mem_total * 100.0) as f32;
 
         let (pid_util, vram_used, _pid_vram) = match &self.gpu {
@@ -348,6 +445,7 @@ fn draw_gauge(
     outer_c: egui::Color32,
     inner_pct: f32,
     inner_c: egui::Color32,
+    pal: &Palette,
 ) {
     let stroke = |w: f32, col: egui::Color32| egui::Stroke::new(w, col);
     let ang = |v: f32| A0 + SWEEP * v / 100.0;
@@ -355,9 +453,9 @@ fn draw_gauge(
     let inner_pct = inner_pct.clamp(0.0, 100.0);
 
     // 底弧 + 红区（外圈 85–100%）
-    p.line(arc_pts(c, R_OUTER, A0, ang(100.0)), stroke(6.5, TRACK));
-    p.line(arc_pts(c, R_OUTER + 6.5, ang(85.0), ang(100.0)), stroke(3.0, RED));
-    p.line(arc_pts(c, R_INNER, A0, ang(100.0)), stroke(3.5, TRACK_IN));
+    p.line(arc_pts(c, R_OUTER, A0, ang(100.0)), stroke(6.5, pal.track));
+    p.line(arc_pts(c, R_OUTER + 6.5, ang(85.0), ang(100.0)), stroke(3.0, pal.red));
+    p.line(arc_pts(c, R_INNER, A0, ang(100.0)), stroke(3.5, pal.track_in));
 
     // 刻度：外每 5%（25% 带数字），内只放主刻度
     for v in (0..=100).step_by(5) {
@@ -365,12 +463,12 @@ fn draw_gauge(
         let major = v % 25 == 0;
         p.line_segment(
             [pt(c, a, if major { 31.0 } else { 34.5 }), pt(c, a, 38.0)],
-            stroke(if major { 2.0 } else { 1.2 }, if major { TICK_MAJOR } else { TICK_MINOR }),
+            stroke(if major { 2.0 } else { 1.2 }, if major { pal.tick_major } else { pal.tick_minor }),
         );
         if major {
             p.text(pt(c, a, 27.0), egui::Align2::CENTER_CENTER, v.to_string(),
-                egui::FontId::monospace(8.0), NUM);
-            p.line_segment([pt(c, a, 18.0), pt(c, a, 23.0)], stroke(1.8, TICK_IN));
+                egui::FontId::monospace(8.0), pal.num);
+            p.line_segment([pt(c, a, 18.0), pt(c, a, 23.0)], stroke(1.8, pal.tick_in));
         }
     }
 
@@ -384,13 +482,20 @@ fn draw_gauge(
     // 双针：外长粗、内短细
     p.line_segment([pt(c, ang(outer_pct), 9.0), pt(c, ang(outer_pct), 34.0)], stroke(2.8, outer_c));
     p.line_segment([pt(c, ang(inner_pct), 8.0), pt(c, ang(inner_pct), 26.0)], stroke(1.8, inner_c));
-    p.circle(c, 4.2, egui::Color32::from_rgb(0x10, 0x14, 0x1A), stroke(1.2, TICK_MINOR));
+    p.circle(c, 4.2, egui::Color32::from_rgb(0x10, 0x14, 0x1A), stroke(1.2, pal.tick_minor));
 }
 
-/// 表盘底部开口区的双列数字读数
-fn readout(p: &egui::Painter, c: egui::Pos2, outer: &str, outer_c: egui::Color32, inner: &str, inner_c: egui::Color32) {
-    for (dx, val, lc) in [(-22.0, outer, outer_c), (22.0, inner, inner_c)] {
-        p.text(c + egui::vec2(dx, 28.0), egui::Align2::CENTER_CENTER, val,
-            egui::FontId::monospace(13.0), lc);
+/// 表盘底部开口区：双列「指标名 + 百分比」，名字与指针同色
+fn readout(
+    p: &egui::Painter,
+    c: egui::Pos2,
+    outer: (&str, f32, egui::Color32),
+    inner: (&str, f32, egui::Color32),
+) {
+    for (dx, (name, val, col)) in [(-22.0, outer), (22.0, inner)] {
+        p.text(c + egui::vec2(dx, 26.0), egui::Align2::CENTER_CENTER, format!("{val:.0}%"),
+            egui::FontId::monospace(13.0), col);
+        p.text(c + egui::vec2(dx, 40.0), egui::Align2::CENTER_CENTER, name,
+            egui::FontId::proportional(8.0), col);
     }
 }
