@@ -1,3 +1,5 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // 双击 exe 不弹黑窗
+
 mod gpu;
 
 use eframe::egui;
@@ -41,12 +43,12 @@ fn main() -> eframe::Result<()> {
     sys.refresh_cpu_usage(); // 采样基线：读数从下一次刷新开始有效
     let gpu = gpu::Gpu::new().ok(); // ponytail: PDH 初始化失败时 GPU 指标显示 0
     let vram_total = gpu::Gpu::total_dedicated();
-    let tray = TrayUi::new().ok(); // ponytail: 托盘失败仅失去快捷入口，主窗口不受影响
     eframe::run_native(
         "sys-gauge",
         options,
         Box::new(move |cc| {
             load_cjk(&cc.egui_ctx);
+            let tray = TrayUi::new(&cc.egui_ctx).ok(); // ponytail: 托盘失败仅失去快捷入口，主窗口不受影响
             if let Some(gl) = cc.gl.clone() {
                 egui_bg_layer::install_glow(&cc.egui_ctx, &gl).ok();
             }
@@ -55,7 +57,6 @@ fn main() -> eframe::Result<()> {
                 gpu,
                 vram_total,
                 stats: Stats::default(),
-                disp: [0.0; 4],
                 last: Instant::now(),
                 topmost: true,
                 style: GlassStyle::Hybrid,
@@ -86,11 +87,12 @@ struct TrayUi {
     topmost: MenuId,
     quit: MenuId,
     check_top: CheckMenuItem,
+    events: std::sync::Arc<std::sync::Mutex<Vec<MenuEvent>>>,
     _tray: TrayIcon,
 }
 
 impl TrayUi {
-    fn new() -> Result<Self, String> {
+    fn new(ctx: &egui::Context) -> Result<Self, String> {
         let style = MenuItem::new("切换玻璃风格", true, None);
         let check_top = CheckMenuItem::new("窗口置顶", true, true, None);
         let quit = MenuItem::new("退出", true, None);
@@ -98,6 +100,13 @@ impl TrayUi {
         menu.append(&style).map_err(|e| e.to_string())?;
         menu.append(&check_top).map_err(|e| e.to_string())?;
         menu.append(&quit).map_err(|e| e.to_string())?;
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let queue = events.clone();
+        let repaint_ctx = ctx.clone();
+        MenuEvent::set_event_handler(Some(move |ev| {
+            queue.lock().unwrap().push(ev);
+            repaint_ctx.request_repaint(); // 菜单点击立即唤醒休眠中的窗口
+        }));
         let _tray = TrayIconBuilder::new()
             .with_icon(
                 tray_icon::Icon::from_rgba(TRAY_RGBA.to_vec(), 32, 32)
@@ -113,6 +122,7 @@ impl TrayUi {
             topmost: check_top.id().clone(),
             quit: quit.id().clone(),
             check_top,
+            events,
             _tray,
         })
     }
@@ -150,6 +160,15 @@ impl GlassStyle {
     }
 }
 
+fn disp_text(i: usize, disp: &[f32; 4], mem_total_gb: f64, vram_total: u64) -> String {
+    match i {
+        0 => format!("{:.0}%", disp[0]),
+        1 => format!("{:.0}%", disp[1]),
+        2 => format!("{:.1}", disp[2] * mem_total_gb as f32 / 100.0),
+        _ => format!("{:.1}", disp[3] * vram_total as f32 / 100.0 / 1073741824.0),
+    }
+}
+
 fn mono(size: f32, text: impl Into<String>) -> egui::RichText {
     egui::RichText::new(text).font(egui::FontId::new(size, egui::FontFamily::Monospace))
 }
@@ -159,7 +178,6 @@ struct App {
     gpu: Option<gpu::Gpu>,
     vram_total: u64,
     stats: Stats,
-    disp: [f32; 4], // 指针平滑显示值：CPU/GPU/内存/显存
     last: Instant,
     topmost: bool,
     style: GlassStyle,
@@ -178,15 +196,18 @@ struct Stats {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
         // 托盘菜单事件（窗口右键菜单已废弃，控制入口全部在托盘）
-        let ids = self.tray.as_ref().map(|t| (t.style.clone(), t.topmost.clone(), t.quit.clone()));
-        if let Some((style_id, top_id, quit_id)) = ids {
-            while let Ok(ev) = MenuEvent::receiver().try_recv() {
-                if ev.id == style_id {
+        let events: Vec<MenuEvent> = self.tray.as_ref()
+            .map(|t| std::mem::take(&mut *t.events.lock().unwrap()))
+            .unwrap_or_default();
+        for ev in events {
+            if let Some(tray) = &self.tray {
+                if ev.id == tray.style {
                     self.style = self.style.next();
-                } else if ev.id == top_id {
+                } else if ev.id == tray.topmost {
                     self.set_topmost(ui, !self.topmost);
-                } else if ev.id == quit_id {
-                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                } else if ev.id == tray.quit {
+                    // ponytail: eframe 退出流程销毁 TrayIcon 时与托盘消息窗口死锁（实测卡死），直接结束进程
+                    std::process::exit(0);
                 }
             }
         }
@@ -194,24 +215,18 @@ impl eframe::App for App {
             self.last = Instant::now();
             self.sample();
         }
-        // 事件驱动：任一指针在动才重绘（30fps）；到位即休眠到下一次采样
+        // 指针动画：egui 内置 1s 插值（新值从当前动画值续接，动画期自动重绘，结束自动休眠）
         let targets = [self.stats.cpu, self.stats.gpu_pct, self.stats.mem_pct, self.stats.vram_pct];
-        let mut moving = false;
-        for (i, d) in self.disp.iter_mut().enumerate() {
-            let step = (targets[i] - *d) * 0.35; // 带符号差：超过目标时向回收敛
-            if step.abs() > 0.25 {
-                *d += step;
-                moving = true;
-            } else {
-                *d = targets[i];
-            }
-        }
-        if moving {
-            ui.ctx().request_repaint_after(Duration::from_millis(33));
-        } else {
-            let wait = Duration::from_secs(1).saturating_sub(self.last.elapsed());
-            ui.ctx().request_repaint_after(wait.max(Duration::from_millis(33)));
-        }
+        let anim = |key: &str, v: f32| ui.ctx().animate_value_with_time(egui::Id::new(key), v, 1.0);
+        let disp = [
+            anim("anim-cpu", targets[0]),
+            anim("anim-gpu", targets[1]),
+            anim("anim-mem", targets[2]),
+            anim("anim-vram", targets[3]),
+        ];
+        // 采样计时驱动下一帧（动画期间由 animate_value_with_time 自己安排重绘）
+        let wait = Duration::from_secs(1).saturating_sub(self.last.elapsed());
+        ui.ctx().request_repaint_after(wait.max(Duration::from_millis(33)));
 
         let (glow_a, blur_r, sat, overlay_a) = self.style.params();
 
@@ -259,12 +274,12 @@ impl eframe::App for App {
                 let p = &ui.painter().clone();
                 let (r1, _) = ui.allocate_exact_size(egui::vec2(w, 106.0), egui::Sense::hover());
                 let c1 = r1.center() + egui::vec2(0.0, 4.0);
-                draw_gauge(p, c1, self.disp[0], CPU, self.disp[1], GPU);
-                readout(p, c1, &self.disp_text(0), CPU, &self.disp_text(1), GPU);
+                draw_gauge(p, c1, disp[0], CPU, disp[1], GPU);
+                readout(p, c1, &disp_text(0, &disp, self.stats.mem_total_gb, self.vram_total), CPU, &disp_text(1, &disp, self.stats.mem_total_gb, self.vram_total), GPU);
                 let (r2, _) = ui.allocate_exact_size(egui::vec2(w, 106.0), egui::Sense::hover());
                 let c2 = r2.center() + egui::vec2(0.0, 4.0);
-                draw_gauge(p, c2, self.disp[2], MEM, self.disp[3], VRAM);
-                readout(p, c2, &self.disp_text(2), MEM, &self.disp_text(3), VRAM);
+                draw_gauge(p, c2, disp[2], MEM, disp[3], VRAM);
+                readout(p, c2, &disp_text(2, &disp, self.stats.mem_total_gb, self.vram_total), MEM, &disp_text(3, &disp, self.stats.mem_total_gb, self.vram_total), VRAM);
             });
         });
     }
@@ -281,15 +296,6 @@ impl App {
             1 => self.stats.gpu_pct,
             2 => self.stats.mem_pct,
             _ => self.stats.vram_pct,
-        }
-    }
-
-    fn disp_text(&self, i: usize) -> String {
-        match i {
-            0 => format!("{:.0}%", self.disp[0]),
-            1 => format!("{:.0}%", self.disp[1]),
-            2 => format!("{:.1}", self.disp[2] * self.stats.mem_total_gb as f32 / 100.0),
-            _ => format!("{:.1}", self.disp[3] * self.vram_total as f32 / 100.0 / 1073741824.0),
         }
     }
 
