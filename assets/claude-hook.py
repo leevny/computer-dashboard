@@ -10,6 +10,12 @@ try:
     sid = str(d.get("session_id", ""))[:48] or "unknown"
     p = os.path.join(os.path.expanduser("~"), ".claude", "light", "sessions")
     os.makedirs(p, exist_ok=True)
+    if state == "delete":  # SessionEnd：会话结束，灯即时消失
+        try:
+            os.remove(os.path.join(p, sid + ".json"))
+        except FileNotFoundError:
+            pass
+        sys.exit(0)
     tmp = os.path.join(p, ".tmp")
     json.dump({"state": state, "session": sid,
                "ts": datetime.datetime.now(datetime.timezone.utc).isoformat()},

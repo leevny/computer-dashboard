@@ -154,7 +154,7 @@ fn main() -> eframe::Result<()> {
                 gpu,
                 vram_total,
                 stats: Stats::default(),
-                light: Light::Gray,
+                sessions: Vec::new(),
                 last: Instant::now(),
                 topmost: true,
                 style: GlassStyle::Hybrid,
@@ -178,20 +178,6 @@ fn load_cjk(ctx: &egui::Context) {
         }
     }
     ctx.set_fonts(fonts);
-}
-
-/// 调整整窗 uniform alpha（255 = 不透明）
-fn set_uniform_alpha(frame: &eframe::Frame, alpha: u8) {
-    #[allow(deprecated)]
-    use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::WindowsAndMessaging::{SetLayeredWindowAttributes, LWA_ALPHA};
-    #[allow(deprecated)]
-    let Ok(RawWindowHandle::Win32(w)) = HasRawWindowHandle::raw_window_handle(frame) else { return };
-    let hwnd = HWND(w.hwnd.get() as *mut core::ffi::c_void);
-    unsafe {
-        SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), alpha, LWA_ALPHA);
-    }
 }
 
 /// 系统托盘：右下角小图标 + 右键菜单（玻璃风格单选 / 主题单选 / 置顶 / 退出）
@@ -280,7 +266,7 @@ struct App {
     gpu: Option<gpu::Gpu>,
     vram_total: u64,
     stats: Stats,
-    light: Light,
+    sessions: Vec<(String, Light)>, // 每会话一灯：session_id + 状态
     last: Instant,
     topmost: bool,
     style: GlassStyle,
@@ -290,7 +276,6 @@ struct App {
 
 #[derive(Clone, Copy, PartialEq, PartialOrd)]
 enum Light {
-    Gray,
     Green,
     Yellow,
     Red,
@@ -299,7 +284,6 @@ enum Light {
 impl Light {
     fn text(self) -> &'static str {
         match self {
-            Light::Gray => "状态过期",
             Light::Green => "空闲",
             Light::Yellow => "执行中",
             Light::Red => "需要接入",
@@ -308,7 +292,6 @@ impl Light {
     /// 状态灯颜色（状态语义色，非指标色）
     fn color(self) -> egui::Color32 {
         match self {
-            Light::Gray => egui::Color32::from_rgb(0x6A, 0x73, 0x81),
             Light::Green => egui::Color32::from_rgb(0x34, 0xC7, 0x59),
             Light::Yellow => egui::Color32::from_rgb(0xE6, 0xB4, 0x50),
             Light::Red => egui::Color32::from_rgb(0xE5, 0x54, 0x4B),
@@ -418,19 +401,25 @@ impl eframe::App for App {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
-            // Claude Code 状态灯（右上角，不遮挡表盘）
-            let lc = self.light.color();
-            let mut lr = 4.5f32;
-            let mut lcol = lc;
-            if self.light == Light::Yellow {
-                let ph = self.last.elapsed().as_secs_f32() % 1.2 / 1.2;
-                lcol = lc.gamma_multiply((90.0 + 140.0 * (0.5 - 0.5 * (ph * std::f32::consts::TAU).cos())) / 255.0);
-                lr = 4.2 + 0.8 * (0.5 - 0.5 * (ph * std::f32::consts::TAU).cos());
+            // Claude Code 状态灯 v2：中间竖排，一灯一会话（不遮挡两盘与标注）
+            let lx = bg_rect.center().x;
+            let any_yellow = self.sessions.iter().any(|(_, st)| *st == Light::Yellow);
+            let mut ph = 0.0f32;
+            if any_yellow {
+                ph = self.last.elapsed().as_secs_f32() % 1.2 / 1.2;
                 ui.ctx().request_repaint_after(Duration::from_millis(60)); // 呼吸闪烁
             }
-            let lp = egui::pos2(bg_rect.right() - 14.0, bg_rect.top() + 10.0);
-            bp.circle_filled(lp, lr + 2.5, lcol.gamma_multiply(0.25)); // 柔和描边
-            bp.circle_filled(lp, lr, lcol);
+            for (i, (_, st)) in self.sessions.iter().enumerate() {
+                let ly = bg_rect.top() + 16.0 + i as f32 * 12.0;
+                let mut lcol = st.color();
+                let mut lr = 3.2f32;
+                if *st == Light::Yellow {
+                    lcol = lcol.gamma_multiply((90.0 + 140.0 * (0.5 - 0.5 * (ph * std::f32::consts::TAU).cos())) / 255.0);
+                    lr = 3.0 + 0.6 * (0.5 - 0.5 * (ph * std::f32::consts::TAU).cos());
+                }
+                bp.circle_filled(egui::pos2(lx, ly), lr + 1.8, lcol.gamma_multiply(0.25));
+                bp.circle_filled(egui::pos2(lx, ly), lr, lcol);
+            }
 
             // 两个表盘清晰地画在玻璃层之上，等分窗口
             ui.horizontal(|ui| {
@@ -472,29 +461,30 @@ impl App {
         } else {
             0.0
         };
-        self.poll_light();
+        self.poll_sessions();
     }
 
-    /// Claude Code 状态灯：聚合 light/sessions 下 60s 内的状态（取最严重），
-    /// 红灯兜底扫描最新 transcript 尾部（限额 / API 错误，结构化锚点防误报）。
-    fn poll_light(&mut self) {
+    /// Claude Code 状态灯 v2：一灯一会话。收集 light/sessions 下 60s 内的
+    /// 会话（按 mtime 新→旧，上限 8），红灯兜底扫描最新 transcript 尾部
+    /// （限额 / API 错误，结构化锚点防误报），命中全部转红。
+    fn poll_sessions(&mut self) {
         let home = std::env::var("USERPROFILE").unwrap_or_default();
         let dir = std::path::PathBuf::from(&home).join(".claude").join("light").join("sessions");
         let now = std::time::SystemTime::now();
-        let mut worst: Option<Light> = None;
+        let mut list: Vec<(std::time::SystemTime, String, Light)> = Vec::new();
         if let Ok(rd) = std::fs::read_dir(&dir) {
             for e in rd.flatten() {
-                let ok_meta = e.metadata().map(|m| {
+                let age_ok = e.metadata().map(|m| {
                     m.modified().map(|mt| {
                         now.duration_since(mt).map(|d| d.as_secs()).unwrap_or(0)
                     }).unwrap_or(u64::MAX)
                 }).unwrap_or(u64::MAX);
-                if ok_meta > 86400 {
+                if age_ok > 86400 {
                     let _ = std::fs::remove_file(e.path()); // 顺手清一天以上的陈旧文件
                     continue;
                 }
-                if ok_meta > 60 {
-                    continue; // 过期不参与聚合
+                if age_ok > 60 {
+                    continue; // 过期不渲染（兜底：会话异常退出无 SessionEnd 时灯自动消失）
                 }
                 if let Ok(v) = std::fs::read_to_string(e.path()) {
                     let st = if v.contains("\"state\":\"red\"") {
@@ -504,27 +494,50 @@ impl App {
                     } else if v.contains("\"state\":\"green\"") {
                         Light::Green
                     } else {
-                        Light::Gray
+                        continue;
                     };
-                    if st != Light::Gray && worst.map_or(true, |w| st > w) {
-                        worst = Some(st);
-                    }
+                    let sid = e.path().file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                    let mt = e.metadata().and_then(|m| m.modified()).unwrap_or(now);
+                    list.push((mt, sid, st));
                 }
             }
         }
+        list.sort_by(|a, b| b.0.cmp(&a.0)); // 最新会话在最上
+        list.truncate(8);
         // 红灯兜底：最新 transcript 尾部 2KB 匹配限额 / API 错误（结构化锚点防误报）
-        if worst != Some(Light::Red) {
-            if let Some(tail) = latest_transcript_tail(&home) {
-                let t = tail.to_lowercase();
-                if t.contains("\"isapierrormessage\":true") || t.contains("accountquotaexceeded") {
-                    worst = Some(Light::Red);
-                }
+        let mut hit = false;
+        if let Some(tail) = latest_transcript_tail(&home) {
+            let t = tail.to_lowercase();
+            if t.contains("\"isapierrormessage\":true") || t.contains("accountquotaexceeded") {
+                hit = true;
             }
         }
-        self.light = worst.unwrap_or(Light::Gray);
-        // 托盘状态文字
+        if hit {
+            for (_, _, st) in list.iter_mut() {
+                *st = Light::Red;
+            }
+        }
+        self.sessions = list.into_iter().map(|(_, sid, st)| (sid, st)).collect();
+        // 托盘状态文字：计数汇总
+        let (mut r, mut y, mut g) = (0u32, 0u32, 0u32);
+        for (_, st) in &self.sessions {
+            match st {
+                Light::Red => r += 1,
+                Light::Yellow => y += 1,
+                Light::Green => g += 1,
+            }
+        }
+        let text = if self.sessions.is_empty() {
+            "Claude：无活跃会话".to_string()
+        } else {
+            let mut parts = Vec::new();
+            if r > 0 { parts.push(format!("需要接入×{r}")); }
+            if y > 0 { parts.push(format!("执行中×{y}")); }
+            if g > 0 { parts.push(format!("空闲×{g}")); }
+            format!("Claude：{}", parts.join(" · "))
+        };
         if let Some(tray) = &self.tray {
-            tray.status_item.set_text(format!("Claude：{}", self.light.text()));
+            tray.status_item.set_text(text);
         }
     }
 
