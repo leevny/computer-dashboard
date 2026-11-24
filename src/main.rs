@@ -223,7 +223,7 @@ impl GlassStyle {
 }
 
 fn main() -> eframe::Result<()> {
-    // CLI 自测/脚本化：sys-gauge.exe --install-hooks | --remove-hooks（无窗口执行后退出）
+    // CLI 自测/脚本化：gaugelet.exe --install-hooks | --remove-hooks（无窗口执行后退出）
     let args: Vec<String> = std::env::args().collect();
     if let Some(pos) = args.iter().position(|a| a == "--install-hooks" || a == "--remove-hooks") {
         let enable = args[pos] == "--install-hooks";
@@ -235,7 +235,7 @@ fn main() -> eframe::Result<()> {
     }
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("sys-gauge")
+            .with_title("gaugelet")
             .with_always_on_top()
             .with_decorations(false)
             .with_inner_size([224.0, 112.0]),
@@ -246,7 +246,7 @@ fn main() -> eframe::Result<()> {
     let gpu = gpu::Gpu::new().ok(); // ponytail: PDH 初始化失败时 GPU 指标显示 0
     let vram_total = gpu::Gpu::total_dedicated();
     eframe::run_native(
-        "sys-gauge",
+        "gaugelet",
         options,
         Box::new(move |cc| {
             load_cjk(&cc.egui_ctx);
@@ -419,7 +419,7 @@ impl TrayUi {
                     .map_err(|e| e.to_string())?,
             )
             .with_menu(Box::new(menu))
-            .with_tooltip("sys-gauge")
+            .with_tooltip("gaugelet")
             .with_menu_on_left_click(true)
             .build()
             .map_err(|e| e.to_string())?;

@@ -4,7 +4,7 @@
 
 </div>
 
-# sys-gauge
+# gaugelet
 
 A 224×112 always-on-top Windows desktop dashboard: twin-needle tachometer gauges showing CPU / Memory / GPU / VRAM in real time. Built with Rust + egui — low memory footprint, low CPU usage.
 
@@ -45,7 +45,7 @@ Windows 11 + Rust stable toolchain:
 cargo build --release
 ```
 
-Binary: `target/release/sys-gauge.exe` — double-click to run (GUI subsystem, no console window).
+Binary: `target/release/gaugelet.exe` — double-click to run (GUI subsystem, no console window).
 
 
 ## Font subset

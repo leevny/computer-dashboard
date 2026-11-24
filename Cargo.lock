@@ -796,6 +796,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "gaugelet"
+version = "0.1.0"
+dependencies = [
+ "eframe",
+ "egui_bg_layer",
+ "egui_glow",
+ "raw-window-handle",
+ "serde_json",
+ "sysinfo",
+ "tray-icon",
+ "windows",
+]
+
+[[package]]
 name = "gdk"
 version = "0.18.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2448,20 +2462,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
-]
-
-[[package]]
-name = "sys-gauge"
-version = "0.1.0"
-dependencies = [
- "eframe",
- "egui_bg_layer",
- "egui_glow",
- "raw-window-handle",
- "serde_json",
- "sysinfo",
- "tray-icon",
- "windows",
 ]
 
 [[package]]

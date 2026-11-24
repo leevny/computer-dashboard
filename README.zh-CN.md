@@ -4,7 +4,7 @@
 
 </div>
 
-# sys-gauge
+# gaugelet
 
 224×112 的 Windows 桌面常驻仪表盘：Rust + egui 实现，双针双盘（汽车转速表风格）实时显示 CPU / 内存 / GPU / 显存占用，低内存低 CPU 占用，默认置顶。
 
@@ -46,7 +46,7 @@ Win11 + Rust stable toolchain：
 cargo build --release
 ```
 
-产物 `target/release/sys-gauge.exe`，双击运行（GUI subsystem，无控制台窗口）。
+产物 `target/release/gaugelet.exe`，双击运行（GUI subsystem，无控制台窗口）。
 
 
 ## 字体子集
