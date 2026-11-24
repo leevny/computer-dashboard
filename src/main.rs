@@ -5,7 +5,7 @@ mod gpu;
 use eframe::egui;
 use std::time::{Duration, Instant};
 use sysinfo::System;
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, Submenu};
+use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu};
 use tray_icon::{TrayIcon, TrayIconBuilder};
 
 const TRAY_RGBA: &[u8] = include_bytes!("../assets/tray.rgba");
@@ -154,6 +154,7 @@ fn main() -> eframe::Result<()> {
                 gpu,
                 vram_total,
                 stats: Stats::default(),
+                light: Light::Gray,
                 last: Instant::now(),
                 topmost: true,
                 style: GlassStyle::Hybrid,
@@ -195,6 +196,7 @@ fn set_uniform_alpha(frame: &eframe::Frame, alpha: u8) {
 
 /// 系统托盘：右下角小图标 + 右键菜单（玻璃风格单选 / 主题单选 / 置顶 / 退出）
 struct TrayUi {
+    status_item: MenuItem,
     style_items: Vec<CheckMenuItem>,
     theme_items: Vec<CheckMenuItem>,
     topmost: MenuId,
@@ -214,6 +216,7 @@ impl TrayUi {
             .iter()
             .map(|t| CheckMenuItem::new(t.name(), true, *t == Theme::Dark, None))
             .collect();
+        let status_item = MenuItem::new("Claude：状态过期", false, None);
         let check_top = CheckMenuItem::new("窗口置顶", true, true, None);
         let quit = MenuItem::new("退出", true, None);
         let style_sub = Submenu::new("玻璃风格", true);
@@ -225,10 +228,13 @@ impl TrayUi {
             theme_sub.append(it).map_err(|e| e.to_string())?;
         }
         let mut menu = Menu::new();
+        menu.append(&status_item).map_err(|e| e.to_string())?;
+        menu.append(&PredefinedMenuItem::separator()).map_err(|e| e.to_string())?;
         menu.append(&style_sub).map_err(|e| e.to_string())?;
         menu.append(&theme_sub).map_err(|e| e.to_string())?;
-        menu.append(&quit).map_err(|e| e.to_string())?;
+        menu.append(&PredefinedMenuItem::separator()).map_err(|e| e.to_string())?;
         menu.append(&check_top).map_err(|e| e.to_string())?;
+        menu.append(&quit).map_err(|e| e.to_string())?;
         let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
         let queue = events.clone();
         let repaint_ctx = ctx.clone();
@@ -247,6 +253,7 @@ impl TrayUi {
             .build()
             .map_err(|e| e.to_string())?;
         Ok(Self {
+            status_item,
             style_items,
             theme_items,
             topmost: check_top.id().clone(),
@@ -273,11 +280,40 @@ struct App {
     gpu: Option<gpu::Gpu>,
     vram_total: u64,
     stats: Stats,
+    light: Light,
     last: Instant,
     topmost: bool,
     style: GlassStyle,
     theme: Theme,
     tray: Option<TrayUi>,
+}
+
+#[derive(Clone, Copy, PartialEq, PartialOrd)]
+enum Light {
+    Gray,
+    Green,
+    Yellow,
+    Red,
+}
+
+impl Light {
+    fn text(self) -> &'static str {
+        match self {
+            Light::Gray => "状态过期",
+            Light::Green => "空闲",
+            Light::Yellow => "执行中",
+            Light::Red => "需要接入",
+        }
+    }
+    /// 状态灯颜色（状态语义色，非指标色）
+    fn color(self) -> egui::Color32 {
+        match self {
+            Light::Gray => egui::Color32::from_rgb(0x6A, 0x73, 0x81),
+            Light::Green => egui::Color32::from_rgb(0x34, 0xC7, 0x59),
+            Light::Yellow => egui::Color32::from_rgb(0xE6, 0xB4, 0x50),
+            Light::Red => egui::Color32::from_rgb(0xE5, 0x54, 0x4B),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -382,6 +418,20 @@ impl eframe::App for App {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
 
+            // Claude Code 状态灯（右上角，不遮挡表盘）
+            let lc = self.light.color();
+            let mut lr = 4.5f32;
+            let mut lcol = lc;
+            if self.light == Light::Yellow {
+                let ph = self.last.elapsed().as_secs_f32() % 1.2 / 1.2;
+                lcol = lc.gamma_multiply((90.0 + 140.0 * (0.5 - 0.5 * (ph * std::f32::consts::TAU).cos())) / 255.0);
+                lr = 4.2 + 0.8 * (0.5 - 0.5 * (ph * std::f32::consts::TAU).cos());
+                ui.ctx().request_repaint_after(Duration::from_millis(60)); // 呼吸闪烁
+            }
+            let lp = egui::pos2(bg_rect.right() - 14.0, bg_rect.top() + 10.0);
+            bp.circle_filled(lp, lr + 2.5, lcol.gamma_multiply(0.25)); // 柔和描边
+            bp.circle_filled(lp, lr, lcol);
+
             // 两个表盘清晰地画在玻璃层之上，等分窗口
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
@@ -422,6 +472,60 @@ impl App {
         } else {
             0.0
         };
+        self.poll_light();
+    }
+
+    /// Claude Code 状态灯：聚合 light/sessions 下 60s 内的状态（取最严重），
+    /// 红灯兜底扫描最新 transcript 尾部（限额 / API 错误，结构化锚点防误报）。
+    fn poll_light(&mut self) {
+        let home = std::env::var("USERPROFILE").unwrap_or_default();
+        let dir = std::path::PathBuf::from(&home).join(".claude").join("light").join("sessions");
+        let now = std::time::SystemTime::now();
+        let mut worst: Option<Light> = None;
+        if let Ok(rd) = std::fs::read_dir(&dir) {
+            for e in rd.flatten() {
+                let ok_meta = e.metadata().map(|m| {
+                    m.modified().map(|mt| {
+                        now.duration_since(mt).map(|d| d.as_secs()).unwrap_or(0)
+                    }).unwrap_or(u64::MAX)
+                }).unwrap_or(u64::MAX);
+                if ok_meta > 86400 {
+                    let _ = std::fs::remove_file(e.path()); // 顺手清一天以上的陈旧文件
+                    continue;
+                }
+                if ok_meta > 60 {
+                    continue; // 过期不参与聚合
+                }
+                if let Ok(v) = std::fs::read_to_string(e.path()) {
+                    let st = if v.contains("\"state\":\"red\"") {
+                        Light::Red
+                    } else if v.contains("\"state\":\"yellow\"") {
+                        Light::Yellow
+                    } else if v.contains("\"state\":\"green\"") {
+                        Light::Green
+                    } else {
+                        Light::Gray
+                    };
+                    if st != Light::Gray && worst.map_or(true, |w| st > w) {
+                        worst = Some(st);
+                    }
+                }
+            }
+        }
+        // 红灯兜底：最新 transcript 尾部 2KB 匹配限额 / API 错误（结构化锚点防误报）
+        if worst != Some(Light::Red) {
+            if let Some(tail) = latest_transcript_tail(&home) {
+                let t = tail.to_lowercase();
+                if t.contains("\"isapierrormessage\":true") || t.contains("accountquotaexceeded") {
+                    worst = Some(Light::Red);
+                }
+            }
+        }
+        self.light = worst.unwrap_or(Light::Gray);
+        // 托盘状态文字
+        if let Some(tray) = &self.tray {
+            tray.status_item.set_text(format!("Claude：{}", self.light.text()));
+        }
     }
 
     fn set_topmost(&mut self, ui: &egui::Ui, on: bool) {
@@ -506,4 +610,39 @@ fn readout(
         p.text(c + egui::vec2(dx, 40.0), egui::Align2::CENTER_CENTER, name,
             egui::FontId::proportional(8.0), col);
     }
+}
+
+/// ~/.claude/projects 下最新修改的 .jsonl 尾部 2KB
+fn latest_transcript_tail(home: &str) -> Option<String> {
+    use std::time::SystemTime;
+    let root = std::path::PathBuf::from(home).join(".claude").join("projects");
+    let mut newest: Option<(std::path::PathBuf, SystemTime)> = None;
+    for proj in std::fs::read_dir(&root).ok()?.flatten() {
+        if let Ok(rd) = std::fs::read_dir(proj.path()) {
+            for f in rd.flatten() {
+                if f.path().extension().map(|e| e == "jsonl") != Some(true) {
+                    continue;
+                }
+                if let Ok(mt) = f.metadata().and_then(|m| m.modified()) {
+                    if newest.as_ref().map_or(true, |(_, t)| mt > *t) {
+                        newest = Some((f.path(), mt));
+                    }
+                }
+            }
+        }
+    }
+    let (path, _) = newest?;
+    let file = std::fs::File::open(&path).ok()?;
+    let len = file.metadata().ok()?.len();
+    let mut s = String::new();
+    if len > 2048 {
+        use std::io::{Read, Seek, SeekFrom};
+        let mut f = std::io::BufReader::new(file);
+        f.seek(SeekFrom::Start(len - 2048)).ok()?;
+        f.read_to_string(&mut s).ok()?;
+    } else {
+        use std::io::Read;
+        std::io::BufReader::new(file).read_to_string(&mut s).ok()?;
+    }
+    Some(s)
 }
