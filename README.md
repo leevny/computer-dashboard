@@ -8,6 +8,10 @@
 
 A 224×112 always-on-top Windows desktop dashboard: twin-needle tachometer gauges showing CPU / Memory / GPU / VRAM in real time. Built with Rust + egui — low memory footprint, low CPU usage.
 
+![Running — docked at the bottom-right corner](assets/screenshot.png)
+
+*Running: docked at the bottom-right corner, status light = a session is executing*
+
 ## Features
 
 - **Always-on-top frameless mini window** (224×112), draggable, quit via tray
